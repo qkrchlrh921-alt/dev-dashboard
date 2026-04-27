@@ -121,6 +121,7 @@ tr:hover{background:rgba(255,255,255,0.02)}
   <button class="tab-btn" onclick="showTab('telegram',this)">&#128172; 텔레그램</button>
   <button class="tab-btn" onclick="showTab('security',this)">&#128274; 보안</button>
   <button class="tab-btn" onclick="showTab('roadmap',this)">&#128640; 로드맵</button>
+  <button class="tab-btn" onclick="showTab('release',this)">&#128203; 릴리즈</button>
 </div>
 
 <!-- ========== 개요 탭 ========== -->
@@ -172,6 +173,31 @@ tr:hover{background:rgba(255,255,255,0.02)}
       <div style="margin-top:8px">
         <div class="progress"><div class="progress-bar" style="width:88%;background:linear-gradient(90deg,#06b6d4,#3b82f6)"></div></div>
       </div>
+    </div>
+  </div>
+
+  <!-- 최근 변경 로그 -->
+  <h2 style="margin-top:28px">&#128221; 최근 변경</h2>
+  <div style="font-size:11px;color:#94a3b8;line-height:1.9">
+    <div style="color:#3a9ef5;font-weight:700;font-size:12px;margin-bottom:4px">2026-04-27</div>
+    <div style="padding-left:10px;margin-bottom:12px">
+      &bull; Refresh Token 하드닝 (DB기반, 리플레이 감지, logout/logout-all)<br>
+      &bull; authFetch 공통 래퍼 + 자동 토큰 갱신<br>
+      &bull; Admin JWT Bearer 전환 (X-Admin-Secret 제거)<br>
+      &bull; Biz API 정합성 수정 (9개 엔드포인트)<br>
+      &bull; 축구앱: 노쇼/늦은취소 구분, 이의제기 플로우, unread 카운트<br>
+      &bull; 축구앱: 빈 페이지 CTA, 버그리포트 관리자탭<br>
+      &bull; 축구앱: 종료경기 pending 정리, 차단 관계 정리<br>
+      &bull; 매매봇: 긴급 킬스위치 (/kill)<br>
+      &bull; 자동 QA 시스템 (27개 테스트, 30분 크론)<br>
+      &bull; 대시보드 GitHub Pages 공개
+    </div>
+    <div style="color:#3a9ef5;font-weight:700;font-size:12px;margin-bottom:4px">2026-04-26</div>
+    <div style="padding-left:10px">
+      &bull; IR 펀딩 API 5개 엔드포인트<br>
+      &bull; Sentry 준비 코드<br>
+      &bull; matchStatusLabel() 상태 한국어화<br>
+      &bull; BB 터치 익절 ($500/20%)
     </div>
   </div>
 </div>
@@ -729,6 +755,61 @@ tr:hover{background:rgba(255,255,255,0.02)}
       <p>MVP 선수 카드 인스타 스토리 공유 &middot; 바이럴 루프</p>
       <span class="badge badge-new">&#127381; 기획 중</span>
     </div>
+  </div>
+</div>
+
+
+<!-- ========== 릴리즈 탭 ========== -->
+<div id="tab-release" class="tab-content">
+  <h2>&#128203; 릴리즈 체크리스트</h2>
+  <p style="font-size:13px;color:#94a3b8;margin-bottom:16px">배포 준비 상태 점검</p>
+
+  <div class="cat-header">&#9917; TRUST FOOTBALL 배포 체크리스트</div>
+  <table><thead><tr><th>항목</th><th>상태</th></tr></thead><tbody>
+  <tr><td>PHP 문법 체크 (php -l)</td><td><span class="badge badge-done">&#9989; 완료</span></td></tr>
+  <tr><td>SQL Injection 방어 (PDO)</td><td><span class="badge badge-done">&#9989; 완료</span></td></tr>
+  <tr><td>XSS 방어 (htmlspecialchars)</td><td><span class="badge badge-done">&#9989; 완료</span></td></tr>
+  <tr><td>CSRF 토큰</td><td><span class="badge badge-done">&#9989; 완료</span></td></tr>
+  <tr><td>세션 관리</td><td><span class="badge badge-done">&#9989; 완료</span></td></tr>
+  <tr><td>DB 백업 체계</td><td><span class="badge badge-done">&#9989; 완료</span></td></tr>
+  <tr><td>감사로그</td><td><span class="badge badge-done">&#9989; 완료</span></td></tr>
+  <tr><td>제재 시스템</td><td><span class="badge badge-done">&#9989; 완료</span></td></tr>
+  <tr><td>HTTPS (도메인 필요)</td><td><span class="badge badge-partial">&#128993; 대기</span></td></tr>
+  <tr><td>Secure Cookie (HTTPS 이후)</td><td><span class="badge badge-partial">&#128993; 대기</span></td></tr>
+  <tr><td>.env 분리 (localhost)</td><td><span class="badge badge-done">&#9989; 완료</span></td></tr>
+  <tr><td>에러 로그 모니터링</td><td><span class="badge badge-done">&#9989; 완료</span></td></tr>
+  </tbody></table>
+
+  <div class="cat-header">&#128200; RE:CORD 배포 체크리스트</div>
+  <table><thead><tr><th>항목</th><th>상태</th></tr></thead><tbody>
+  <tr><td>JWT 인증 (access + refresh)</td><td><span class="badge badge-done">&#9989; 완료</span></td></tr>
+  <tr><td>토큰 로테이션 + 리플레이 감지</td><td><span class="badge badge-done">&#9989; 완료</span></td></tr>
+  <tr><td>bcrypt 해싱</td><td><span class="badge badge-done">&#9989; 완료</span></td></tr>
+  <tr><td>CORS 제한</td><td><span class="badge badge-done">&#9989; 완료</span></td></tr>
+  <tr><td>Rate Limit (60/min)</td><td><span class="badge badge-done">&#9989; 완료</span></td></tr>
+  <tr><td>Admin 미들웨어</td><td><span class="badge badge-done">&#9989; 완료</span></td></tr>
+  <tr><td>IDOR 수정</td><td><span class="badge badge-done">&#9989; 완료</span></td></tr>
+  <tr><td>/docs 비노출 (production)</td><td><span class="badge badge-done">&#9989; 완료</span></td></tr>
+  <tr><td>Biz API 정합성</td><td><span class="badge badge-done">&#9989; 완료</span></td></tr>
+  <tr><td>HTTPS (도메인 필요)</td><td><span class="badge badge-partial">&#128993; 대기</span></td></tr>
+  <tr><td>Sentry (DSN 대기)</td><td><span class="badge badge-partial">&#128993; 대기</span></td></tr>
+  <tr><td>systemd 서비스</td><td><span class="badge badge-done">&#9989; 완료</span></td></tr>
+  </tbody></table>
+
+  <div class="cat-header">&#127760; 공통</div>
+  <table><thead><tr><th>항목</th><th>상태</th></tr></thead><tbody>
+  <tr><td>Git 브랜치 (main/dev)</td><td><span class="badge badge-done">&#9989; 완료</span></td></tr>
+  <tr><td>자동 QA (27개 테스트, 30분 크론)</td><td><span class="badge badge-done">&#9989; 완료</span></td></tr>
+  <tr><td>텔레그램 알림</td><td><span class="badge badge-done">&#9989; 완료</span></td></tr>
+  <tr><td>도메인 미확보</td><td><span class="badge badge-partial">&#128993; 대기</span></td></tr>
+  <tr><td>앱스토어 미등록</td><td><span class="badge badge-todo">&#10060; 미완</span></td></tr>
+  </tbody></table>
+
+  <div class="summary" style="margin-top:16px">
+    <div class="stat"><div class="num green">24</div><div class="label">완료</div></div>
+    <div class="stat"><div class="num yellow">5</div><div class="label">대기</div></div>
+    <div class="stat"><div class="num red">1</div><div class="label">미완</div></div>
+    <div class="stat"><div class="num blue">80%</div><div class="label">배포 준비율</div></div>
   </div>
 </div>
 
