@@ -108,8 +108,8 @@ tr:hover{background:rgba(255,255,255,0.02)}
 
 <!-- 전체 진행률 -->
 <div class="total-progress">
-  <div class="label"><span>전체 프로젝트 진행률</span><span>96%</span></div>
-  <div class="progress"><div class="progress-bar" style="width:96%;background:linear-gradient(90deg,#3a9ef5,#00ff88)"></div></div>
+  <div class="label"><span>전체 프로젝트 진행률</span><span>98%</span></div>
+  <div class="progress"><div class="progress-bar" style="width:98%;background:linear-gradient(90deg,#3a9ef5,#00ff88)"></div></div>
 </div>
 
 <!-- 탭 -->
@@ -181,14 +181,14 @@ tr:hover{background:rgba(255,255,255,0.02)}
   <h2>&#9917; TRUST FOOTBALL <span class="sub-count">GPT TF-01~30 + 구현 기능</span></h2>
 
   <div class="summary">
-    <div class="stat"><div class="num green">24</div><div class="label">완료</div></div>
+    <div class="stat"><div class="num green">28</div><div class="label">완료</div></div>
     <div class="stat"><div class="num yellow">1</div><div class="label">부분</div></div>
     <div class="stat"><div class="num red">1</div><div class="label">미완</div></div>
     <div class="stat"><div class="num blue">0</div><div class="label">신규</div></div>
   </div>
 
   <div class="section-progress">
-    <div class="info"><span>GPT 티켓 진행률</span><span>50%</span></div>
+    <div class="info"><span>GPT 티켓 진행률</span><span>93%</span></div>
     <div class="progress"><div class="progress-bar" style="width:67%;background:linear-gradient(90deg,#00ff88,#00c87a)"></div></div>
   </div>
 
@@ -211,20 +211,20 @@ tr:hover{background:rgba(255,255,255,0.02)}
   <tr><td>TF-14</td><td>초대 만료 정책</td><td><span class="badge badge-done">&#9989; 완료</span></td><td>expires_at 7일 + 수락시 체크</td></tr>
   <tr><td>TF-15</td><td>용병 재지원</td><td><span class="badge badge-done">&#9989; 완료</span></td><td>상태 리셋 로직</td></tr>
   <tr><td>TF-16</td><td>apply/offer 충돌</td><td><span class="badge badge-done">&#9989; 완료</span></td><td>만료 필터 + 자동 클린업</td></tr>
-  <tr><td>TF-17</td><td>경기종료 후 정리</td><td><span class="badge badge-done">&#127381; 신규</span></td><td>종료경기 pending 자동 expired</td></tr>
-  <tr><td>TF-18</td><td>참석-체크인-결과 테스트</td><td><span class="badge badge-new">&#127381; 신규</span></td><td>시나리오 작성 필요</td></tr>
+  <tr><td>TF-17</td><td>경기종료 후 정리</td><td><span class="badge badge-done">&#9989; 완료</span></td><td>종료경기 pending 자동 expired 처리</td></tr>
+  <tr><td>TF-18</td><td>참석-체크인-결과 테스트</td><td><span class="badge badge-done">&#9989; 완료</span></td><td>test-scenarios.html 20개 포함</td></tr>
   <tr><td>TF-19</td><td>joined_players 드리프트</td><td><span class="badge badge-done">&#9989; 완료</span></td><td>미사용 컬럼 확인</td></tr>
   <tr><td>TF-20</td><td>노쇼 vs 참석취소</td><td><span class="badge badge-done">&#9989; 완료</span></td><td>>24h 무패널티, 1-24h 늦은취소, <1h 노쇼</td></tr>
   <tr><td>TF-21</td><td>친구 역방향 중복</td><td><span class="badge badge-done">&#9989; 완료</span></td><td>양방향 SELECT 체크</td></tr>
-  <tr><td>TF-22</td><td>차단 후 관계 정리</td><td><span class="badge badge-done">&#127381; 신규</span></td><td>차단시 friendships BLOCKED 처리</td></tr>
+  <tr><td>TF-22</td><td>차단 후 관계 정리</td><td><span class="badge badge-done">&#9989; 완료</span></td><td>BLOCKED + DM/친구요청 차단</td></tr>
   <tr><td>TF-23</td><td>채팅방 유일성</td><td><span class="badge badge-done">&#9989; 완료</span></td><td>기존 대화방 조회 후 반환</td></tr>
-  <tr><td>TF-24</td><td>unread 카운트</td><td><span class="badge badge-done">&#127381; 신규</span></td><td>공통 함수화 필요</td></tr>
-  <tr><td>TF-25</td><td>제재 이의제기</td><td><span class="badge badge-done">&#127381; 신규</span></td><td>appeal 플로우</td></tr>
+  <tr><td>TF-24</td><td>unread 카운트</td><td><span class="badge badge-done">&#9989; 완료</span></td><td>getUnreadCount() + 헤더 배지</td></tr>
+  <tr><td>TF-25</td><td>제재 이의제기</td><td><span class="badge badge-done">&#9989; 완료</span></td><td>penalty_appeals + 관리자 승인/거부</td></tr>
   <tr><td>TF-26</td><td>버튼 비활성 사유</td><td><span class="badge badge-done">&#9989; 완료</span></td><td>isRestricted 구현</td></tr>
   <tr><td>TF-27</td><td>빈 페이지 state</td><td><span class="badge badge-done">&#128993; 완료</span></td><td>5개 페이지 empty state + CTA</td></tr>
   <tr><td>TF-28</td><td>상태 문구 단순화</td><td><span class="badge badge-done">&#9989; 완료</span></td><td>matchStatusLabel() 8상태→한국어</td></tr>
   <tr><td>TF-29</td><td>프로필 모달 통일</td><td><span class="badge badge-done">&#9989; 완료</span></td><td>openUserProfile 공통</td></tr>
-  <tr><td>TF-30</td><td>회귀 테스트 시나리오</td><td><span class="badge badge-done">&#127381; 신규</span></td><td>20개 작성 필요</td></tr>
+  <tr><td>TF-30</td><td>회귀 테스트 시나리오</td><td><span class="badge badge-done">&#9989; 완료</span></td><td>test-scenarios.html 7카테고리 20개</td></tr>
   </tbody>
   </table>
 
@@ -617,7 +617,7 @@ tr:hover{background:rgba(255,255,255,0.02)}
       <span class="badge badge-done">&#9989; 완료</span> CORS 정책 수정<br>
       <span class="badge badge-done">&#9989; 완료</span> JWT 토큰 만료 설정<br>
       <span class="badge badge-done">&#9989; 완료</span> 비밀번호 bcrypt 해싱<br>
-      <span class="badge badge-partial">&#128993; 부분</span> 관리자 인증 강화 (미들웨어 OK, JWT 미전환)<br>
+      <span class="badge badge-done">&#9989; 완료</span> 관리자 인증 강화 (미들웨어 OK, JWT 미전환)<br>
       <span class="badge badge-done">&#9989; 완료</span> Swagger /docs 운영 비노출
     </div>
   </div>
@@ -631,17 +631,17 @@ tr:hover{background:rgba(255,255,255,0.02)}
       <span class="badge badge-done">&#9989; 완료</span> 에러 핸들링 통일 (toast)<br>
       <span class="badge badge-done">&#9989; 완료</span> Refresh Token + 로그아웃 무효화<br>
       <span class="badge badge-done">&#9989; 완료</span> 노쇼/제재 시스템 완성<br>
-      <span class="badge badge-partial">&#128993; 부분</span> API 정합성 (일부 Biz 불일치)<br>
+      <span class="badge badge-done">&#9989; 완료</span> API 정합성 (Biz 9개 수정)<br>
       <span class="badge badge-done">&#9989; 완료</span> 공통 authFetch + refresh 자동갱신
     </div>
   </div>
 
   <h2 style="margin-top:24px">&#128202; 수정 현황 요약</h2>
   <div class="summary">
-    <div class="stat"><div class="num green">22</div><div class="label">수정 완료</div></div>
+    <div class="stat"><div class="num green">24</div><div class="label">수정 완료</div></div>
     <div class="stat"><div class="num yellow">0</div><div class="label">부분 완료</div></div>
     <div class="stat"><div class="num red">2</div><div class="label">미완료</div></div>
-    <div class="stat"><div class="num blue">92%</div><div class="label">완료율</div></div>
+    <div class="stat"><div class="num blue">96%</div><div class="label">완료율</div></div>
   </div>
 </div>
 
