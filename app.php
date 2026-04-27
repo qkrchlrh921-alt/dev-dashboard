@@ -700,6 +700,69 @@ if ($page === 'api') {
         echo json_encode(['ok'=>true,'messages'=>$msgs,'me_id'=>(int)me()['id']], JSON_UNESCAPED_UNICODE);
         exit;
     }
+    // [글로벌 검색] ?page=api&fn=global_search&q=검색어
+    if ($fn === 'global_search') {
+        $q = trim($_GET['q'] ?? '');
+        if (mb_strlen($q) < 1) { echo json_encode(['ok'=>true,'results'=>[]]); exit; }
+        $like = '%'.$q.'%';
+        $results = [];
+        // 팀 검색
+        $ts = $pdo->prepare("SELECT id, name, region FROM teams WHERE name LIKE ? AND status='ACTIVE' LIMIT 5");
+        $ts->execute([$like]);
+        foreach ($ts->fetchAll() as $t) {
+            $results[] = ['type'=>'team','id'=>$t['id'],'title'=>$t['name'],'sub'=>$t['region']??'','icon'=>'bi-people-fill','link'=>'?page=team_profile&team_id='.$t['id']];
+        }
+        // 유저 검색
+        $us = $pdo->prepare("SELECT id, name, nickname FROM users WHERE (name LIKE ? OR nickname LIKE ?) AND is_temp=0 LIMIT 5");
+        $us->execute([$like, $like]);
+        foreach ($us->fetchAll() as $u) {
+            $dn = trim($u['nickname'] ?? '') ?: $u['name'];
+            $results[] = ['type'=>'user','id'=>$u['id'],'title'=>$dn,'sub'=>$u['name'],'icon'=>'bi-person-fill','link'=>'javascript:openProfileModal('.$u['id'].')'];
+        }
+        // 매치 검색
+        $ms = $pdo->prepare("SELECT id, title, location, match_date FROM matches WHERE (title LIKE ? OR location LIKE ?) AND status NOT IN ('cancelled','force_closed') ORDER BY match_date DESC LIMIT 5");
+        $ms->execute([$like, $like]);
+        foreach ($ms->fetchAll() as $m) {
+            $results[] = ['type'=>'match','id'=>$m['id'],'title'=>$m['title']?:$m['location'],'sub'=>$m['match_date'],'icon'=>'bi-calendar2-week-fill','link'=>'?page=match&id='.$m['id']];
+        }
+        echo json_encode(['ok'=>true,'results'=>$results], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+
+    // [활동 피드] ?page=api&fn=activity_feed
+    if ($fn === 'activity_feed') {
+        $items = [];
+        $myTid = myTeamId() ?: 0;
+        // 새 경기 생성
+        $q1 = $pdo->prepare("SELECT m.id, m.title, m.created_at, t.name AS team_name FROM matches m LEFT JOIN teams t ON t.id=m.home_team_id WHERE m.status NOT IN ('cancelled','force_closed') ORDER BY m.created_at DESC LIMIT 5");
+        $q1->execute();
+        foreach ($q1->fetchAll() as $r) {
+            $items[] = ['icon'=>'bi-calendar-plus','color'=>'#00ff88','msg'=>($r['team_name']?h($r['team_name']).' - ':'').h($r['title']?:'새 경기').' 생성','time'=>$r['created_at'],'link'=>'?page=match&id='.$r['id']];
+        }
+        // 팀원 가입 (최근)
+        $q2 = $pdo->prepare("SELECT tm.joined_at, u.name, u.nickname, t.name AS team_name FROM team_members tm JOIN users u ON u.id=tm.user_id JOIN teams t ON t.id=tm.team_id WHERE tm.status='active' AND tm.joined_at IS NOT NULL ORDER BY tm.joined_at DESC LIMIT 3");
+        $q2->execute();
+        foreach ($q2->fetchAll() as $r) {
+            $dn = trim($r['nickname'] ?? '') ?: $r['name'];
+            $items[] = ['icon'=>'bi-person-plus-fill','color'=>'#3a9ef5','msg'=>h($dn).'님이 '.h($r['team_name']).'에 가입','time'=>$r['joined_at'],'link'=>''];
+        }
+        // 경기 결과 확정
+        $q3 = $pdo->query("SELECT mr.match_id, mr.score_home, mr.score_away, mr.created_at, m.title FROM match_results mr JOIN matches m ON m.id=mr.match_id WHERE mr.is_approved=1 ORDER BY mr.created_at DESC LIMIT 3");
+        foreach ($q3->fetchAll() as $r) {
+            $items[] = ['icon'=>'bi-trophy-fill','color'=>'#ffb400','msg'=>h($r['title']?:'경기').' 결과: '.$r['score_home'].'-'.$r['score_away'],'time'=>$r['created_at'],'link'=>'?page=match&id='.$r['match_id']];
+        }
+        // 용병 모집
+        $q4 = $pdo->query("SELECT m.id, m.title, m.created_at, t.name AS team_name FROM matches m LEFT JOIN teams t ON t.id=m.home_team_id WHERE m.allow_mercenary=1 AND m.match_date >= CURDATE() AND m.status IN ('open','confirmed') ORDER BY m.created_at DESC LIMIT 3");
+        foreach ($q4->fetchAll() as $r) {
+            $items[] = ['icon'=>'bi-lightning-charge-fill','color'=>'#ff9500','msg'=>h($r['team_name']?:$r['title']).': 용병 모집 중','time'=>$r['created_at'],'link'=>'?page=match&id='.$r['id']];
+        }
+        // 시간순 정렬
+        usort($items, fn($a,$b) => strtotime($b['time']??'2000-01-01') - strtotime($a['time']??'2000-01-01'));
+        $items = array_slice($items, 0, 10);
+        echo json_encode(['ok'=>true,'items'=>$items], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+
     http_response_code(404); echo json_encode(['ok'=>false,'err'=>'unknown_fn']); exit;
 }
 
@@ -1134,6 +1197,7 @@ function handleAction(PDO $pdo, string $action): void {
             $matchId = (int)($_POST['match_id'] ?? 0);
             $hs = max(0,(int)($_POST['home_score']??0));
             $as = max(0,(int)($_POST['away_score']??0));
+            $scorersJson = $_POST['scorers_json'] ?? null;
             $match = $pdo->prepare("SELECT * FROM matches WHERE id=?");
             $match->execute([$matchId]); $match = $match->fetch();
             if (!$match) { flash('매치를 찾을 수 없습니다.','error'); redirect('?page=matches'); }
@@ -1141,16 +1205,83 @@ function handleAction(PDO $pdo, string $action): void {
                 flash('해당 매치 팀만 결과를 입력할 수 있습니다.', 'error');
                 redirect('?page=match&id='.$matchId);
             }
-            $ex = $pdo->prepare("SELECT id FROM match_results WHERE match_id=?");
-            $ex->execute([$matchId]);
-            if ($ex->fetch()) {
-                $pdo->prepare("UPDATE match_results SET score_home=?,score_away=?,reporter_id=?,is_approved=0 WHERE match_id=?")
-                    ->execute([$hs,$as,me()['id'],$matchId]);
-            } else {
-                $pdo->prepare("INSERT INTO match_results (match_id,score_home,score_away,reporter_id) VALUES (?,?,?,?)")
-                    ->execute([$matchId,$hs,$as,me()['id']]);
+            $myTid = myTeamId();
+            // Save to match_result_submissions (per-team)
+            try {
+                $pdo->prepare("INSERT INTO match_result_submissions (match_id, team_id, submitted_by, score_home, score_away, scorers_json)
+                    VALUES (?,?,?,?,?,?) ON DUPLICATE KEY UPDATE score_home=VALUES(score_home), score_away=VALUES(score_away), scorers_json=VALUES(scorers_json), submitted_by=VALUES(submitted_by), created_at=NOW()")
+                    ->execute([$matchId, $myTid, me()['id'], $hs, $as, $scorersJson]);
+            } catch(PDOException $e) {}
+
+            // Check if both teams submitted
+            $subs = $pdo->prepare("SELECT team_id, score_home, score_away FROM match_result_submissions WHERE match_id=?");
+            $subs->execute([$matchId]); $allSubs = $subs->fetchAll();
+            $homeTeamId = (int)$match['home_team_id'];
+            $awayTeamId = (int)$match['away_team_id'];
+            $homeSub = $awaySub = null;
+            foreach($allSubs as $sub) {
+                if ((int)$sub['team_id'] === $homeTeamId) $homeSub = $sub;
+                if ((int)$sub['team_id'] === $awayTeamId) $awaySub = $sub;
             }
-            $pdo->prepare("UPDATE matches SET status='result_pending' WHERE id=?")->execute([$matchId]);
+
+            if ($homeSub && $awaySub) {
+                if ((int)$homeSub['score_home'] === (int)$awaySub['score_home'] && (int)$homeSub['score_away'] === (int)$awaySub['score_away']) {
+                    // Scores match - auto-approve
+                    $finalH = (int)$homeSub['score_home'];
+                    $finalA = (int)$homeSub['score_away'];
+                    $ex = $pdo->prepare("SELECT id FROM match_results WHERE match_id=?");
+                    $ex->execute([$matchId]);
+                    if ($ex->fetch()) {
+                        $pdo->prepare("UPDATE match_results SET score_home=?,score_away=?,reporter_id=?,is_approved=1 WHERE match_id=?")
+                            ->execute([$finalH,$finalA,me()['id'],$matchId]);
+                    } else {
+                        $pdo->prepare("INSERT INTO match_results (match_id,score_home,score_away,reporter_id,is_approved) VALUES (?,?,?,?,1)")
+                            ->execute([$matchId,$finalH,$finalA,me()['id']]);
+                    }
+                    $pdo->prepare("UPDATE matches SET status='result_pending' WHERE id=? AND status NOT IN ('completed')")->execute([$matchId]);
+                    foreach([$homeTeamId, $awayTeamId] as $tid) {
+                        $capQ = $pdo->prepare("SELECT user_id FROM team_members WHERE team_id=? AND role='captain' AND status='active' LIMIT 1");
+                        $capQ->execute([$tid]); $cid = (int)$capQ->fetchColumn();
+                        if ($cid) notify($pdo, $cid, 'MATCH', '경기 결과 자동 승인', "양팀 결과가 일치하여 자동 승인되었습니다. ({$finalH}:{$finalA})", '?page=match&id='.$matchId);
+                    }
+                    flash('양팀 결과가 일치하여 자동 승인되었습니다!');
+                } else {
+                    // Scores differ - flag for admin
+                    $pdo->prepare("UPDATE matches SET status='result_pending' WHERE id=? AND status NOT IN ('completed')")->execute([$matchId]);
+                    $ex = $pdo->prepare("SELECT id FROM match_results WHERE match_id=?");
+                    $ex->execute([$matchId]);
+                    if (!$ex->fetch()) {
+                        $pdo->prepare("INSERT INTO match_results (match_id,score_home,score_away,reporter_id,is_approved) VALUES (?,?,?,?,0)")
+                            ->execute([$matchId,$hs,$as,me()['id']]);
+                    }
+                    try {
+                        $admins = $pdo->query("SELECT id FROM users WHERE is_admin=1");
+                        foreach($admins->fetchAll() as $adm) {
+                            notify($pdo, (int)$adm['id'], 'ADMIN', '결과 불일치 - 관리자 확인 필요', "매치 #{$matchId} 양팀 입력 결과가 다릅니다.", '?page=match&id='.$matchId);
+                        }
+                    } catch(PDOException $e) {}
+                    flash('양팀 입력 결과가 다릅니다. 관리자 검토 후 확정됩니다.', 'warning');
+                }
+            } else {
+                // Only one team submitted
+                $ex = $pdo->prepare("SELECT id FROM match_results WHERE match_id=?");
+                $ex->execute([$matchId]);
+                if ($ex->fetch()) {
+                    $pdo->prepare("UPDATE match_results SET score_home=?,score_away=?,reporter_id=?,is_approved=0 WHERE match_id=?")
+                        ->execute([$hs,$as,me()['id'],$matchId]);
+                } else {
+                    $pdo->prepare("INSERT INTO match_results (match_id,score_home,score_away,reporter_id) VALUES (?,?,?,?)")
+                        ->execute([$matchId,$hs,$as,me()['id']]);
+                }
+                $pdo->prepare("UPDATE matches SET status='result_pending' WHERE id=?")->execute([$matchId]);
+                $otherTid = ($myTid === $homeTeamId) ? $awayTeamId : $homeTeamId;
+                if ($otherTid) {
+                    $capQ = $pdo->prepare("SELECT user_id FROM team_members WHERE team_id=? AND role='captain' AND status='active' LIMIT 1");
+                    $capQ->execute([$otherTid]); $oppCap = (int)$capQ->fetchColumn();
+                    if ($oppCap) notify($pdo, $oppCap, 'MATCH', '상대팀이 경기 결과를 입력했습니다', '우리 팀도 결과를 입력해주세요.', '?page=match&id='.$matchId);
+                }
+                flash('결과 입력 완료! 상대팀도 결과를 입력하면 자동 승인됩니다.');
+            }
             // [자동] 참석자 전원 match_player_records 생성 (없는 경우만 INSERT IGNORE)
             $attAll = $pdo->prepare("
                 SELECT ma.user_id, ma.team_id,
@@ -1831,6 +1962,32 @@ function handleAction(PDO $pdo, string $action): void {
             }
             flash('평가가 등록되었습니다. 양 팀 평가 완료 시 결과가 공식 반영됩니다.');
             redirect('?page=match&id='.$matchId);
+            break;
+
+        case 'submit_team_review':
+            requireLogin();
+            if (!isCaptain()) { flash('캡틴/매니저만 작성 가능합니다.', 'error'); redirect('?page=home'); }
+            $matchId = (int)($_POST['match_id'] ?? 0);
+            $targetTeamId = (int)($_POST['target_team_id'] ?? 0);
+            $rating = max(1, min(5, (int)($_POST['rating'] ?? 3)));
+            $comment = trim(mb_substr($_POST['review_comment'] ?? '', 0, 500));
+            $myTid = myTeamId();
+            if (!$matchId || !$targetTeamId || !$myTid) { flash('잘못된 요청입니다.', 'error'); redirect('?page=home'); }
+            try {
+                $pdo->prepare("INSERT INTO team_match_reviews (match_id, reviewer_team_id, target_team_id, rating, comment, submitted_by)
+                    VALUES (?,?,?,?,?,?) ON DUPLICATE KEY UPDATE rating=VALUES(rating), comment=VALUES(comment), submitted_by=VALUES(submitted_by)")
+                    ->execute([$matchId, $myTid, $targetTeamId, $rating, $comment, me()['id']]);
+                $delta = ($rating - 3) * 0.3;
+                $oppCap = $pdo->prepare("SELECT user_id FROM team_members WHERE team_id=? AND role='captain' AND status='active' LIMIT 1");
+                $oppCap->execute([$targetTeamId]); $oppCapId = (int)$oppCap->fetchColumn();
+                if ($oppCapId && abs($delta) > 0) {
+                    applyMannerDelta($pdo, $oppCapId, $delta, $matchId, "팀 방명록 평점: {$rating}/5");
+                }
+                flash('방명록이 등록되었습니다.');
+            } catch(PDOException $e) {
+                flash('이미 작성된 방명록이 있거나 오류가 발생했습니다.', 'error');
+            }
+            redirect('?page=team_eval&match_id='.$matchId);
             break;
 
         // ── [1-1] 노쇼/비매너 신고 ──
@@ -3097,7 +3254,7 @@ function handleAction(PDO $pdo, string $action): void {
             // 본인 직책도 변경 가능 (구단주 등 자기 임명)
             $pdo->prepare("UPDATE team_members SET role=? WHERE team_id=? AND user_id=? AND status='active'")
                 ->execute([$newRole, myTeamId(), $targetId]);
-            $roleLabels = ['player'=>'선수','owner'=>'구단주','president'=>'회장','director'=>'감독','captain'=>'주장','vice_captain'=>'부주장','manager'=>'매니저','coach'=>'코치','treasurer'=>'총무','analyst'=>'전력분석','doctor'=>'팀닥터'];
+            $roleLabels = ['player'=>'선수','owner'=>'구단주','president'=>'회장','director'=>'단장','captain'=>'주장','vice_captain'=>'부주장','manager'=>'매니저','coach'=>'감독','treasurer'=>'총무','analyst'=>'전력분석','doctor'=>'팀닥터'];
             flash(($roleLabels[$newRole] ?? $newRole).'(으)로 직책을 변경했습니다.');
             redirect('?page=team');
             break;
@@ -3648,6 +3805,318 @@ function handleAction(PDO $pdo, string $action): void {
             break;
 
         // ── 월별 일괄 납부 처리 ──
+
+        // ═══════ CS CENTER ACTIONS ═══════
+        case 'cs_submit_ticket':
+            requireLogin();
+            // 도배 방지: 미답변 티켓 3개 제한
+            $pendingCount = $pdo->prepare("SELECT COUNT(*) FROM cs_tickets WHERE user_id=? AND status IN ('pending','assigned','in_review')");
+            $pendingCount->execute([me()['id']]);
+            if ((int)$pendingCount->fetchColumn() >= 3) {
+                flash('미답변 문의가 3건 이상입니다. 기존 문의에 답변이 완료된 후 새 문의를 등록해주세요.', 'error');
+                redirect('?page=cs&action=my');
+            }
+            // 쿨타임: 마지막 문의 후 3분
+            $lastTicket = $pdo->prepare("SELECT created_at FROM cs_tickets WHERE user_id=? ORDER BY created_at DESC LIMIT 1");
+            $lastTicket->execute([me()['id']]);
+            $lastTime = $lastTicket->fetchColumn();
+            if ($lastTime && (time() - strtotime($lastTime)) < 180) {
+                flash('문의는 3분에 1건만 접수할 수 있습니다.', 'error');
+                redirect('?page=cs');
+            }
+            $cat = trim($_POST['category'] ?? '');
+            $title = trim($_POST['title'] ?? '');
+            $content = trim($_POST['content'] ?? '');
+            $subType = trim($_POST['sub_type'] ?? '');
+            $relatedUserId = (int)($_POST['related_user_id'] ?? 0);
+            $relatedTeamId = (int)($_POST['related_team_id'] ?? 0);
+            $relatedMatchId = (int)($_POST['related_match_id'] ?? 0);
+            $imageUrl = trim($_POST['image_url'] ?? '');
+
+            if (!$cat || !$title || !$content) {
+                flash('필수 항목을 모두 입력하세요.', 'error');
+                redirect('?page=cs&action=new&cat=' . urlencode($cat));
+            }
+            if (mb_strlen($title) < 3) {
+                flash('제목은 3자 이상 입력하세요.', 'error');
+                redirect('?page=cs&action=new&cat=' . urlencode($cat));
+            }
+
+            // Get category default priority
+            $catRow = $pdo->prepare("SELECT priority_default FROM cs_categories WHERE code=? AND is_active=1");
+            $catRow->execute([$cat]);
+            $catData = $catRow->fetch();
+            if (!$catData) {
+                flash('유효하지 않은 카테고리입니다.', 'error');
+                redirect('?page=cs');
+            }
+            $priority = $catData['priority_default'];
+
+            // Generate ticket number: CS-YYYYMMDD-NNNN
+            $today = date('Ymd');
+            $countToday = $pdo->query("SELECT COUNT(*) FROM cs_tickets WHERE ticket_no LIKE 'CS-$today-%'")->fetchColumn();
+            $ticketNo = 'CS-' . $today . '-' . str_pad($countToday + 1, 4, '0', STR_PAD_LEFT);
+
+            // Handle image upload - 보안 검증
+            $uploadedImage = '';
+            if (!empty($_FILES['image']['tmp_name'])) {
+                $fileSize = $_FILES['image']['size'];
+                if ($fileSize > 5 * 1024 * 1024) {
+                    flash('파일 크기는 5MB 이하만 가능합니다.', 'error');
+                    redirect('?page=cs&action=new&cat=' . urlencode($cat));
+                }
+                $mimeType = mime_content_type($_FILES['image']['tmp_name']);
+                $allowedMimes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
+                if (!in_array($mimeType, $allowedMimes)) {
+                    flash('이미지 파일만 첨부 가능합니다 (JPG, PNG, GIF, WEBP).', 'error');
+                    redirect('?page=cs&action=new&cat=' . urlencode($cat));
+                }
+            }
+            if (!empty($_FILES['image']['name']) && $_FILES['image']['error'] === UPLOAD_ERR_OK) {
+                $ext = strtolower(pathinfo($_FILES['image']['name'], PATHINFO_EXTENSION));
+                $allowed = ['jpg','jpeg','png','gif','webp'];
+                if (in_array($ext, $allowed) && $_FILES['image']['size'] <= 5*1024*1024) {
+                    $uploadDir = '/var/www/html/uploads/cs/';
+                    if (!is_dir($uploadDir)) mkdir($uploadDir, 0755, true);
+                    $fn = 'cs_' . me()['id'] . '_' . time() . '.' . $ext;
+                    move_uploaded_file($_FILES['image']['tmp_name'], $uploadDir . $fn);
+                    $uploadedImage = '/uploads/cs/' . $fn;
+                }
+            }
+
+            $pdo->prepare("INSERT INTO cs_tickets (ticket_no, user_id, category_code, sub_type, title, content, priority, related_user_id, related_team_id, related_match_id, image_url) VALUES (?,?,?,?,?,?,?,?,?,?,?)")
+                ->execute([$ticketNo, me()['id'], $cat, $subType ?: null, $title, $content, $priority, $relatedUserId ?: null, $relatedTeamId ?: null, $relatedMatchId ?: null, $uploadedImage ?: ($imageUrl ?: null)]);
+            $ticketId = (int)$pdo->lastInsertId();
+
+            // Add initial message
+            $pdo->prepare("INSERT INTO cs_messages (ticket_id, sender_type, sender_id, content) VALUES (?,?,?,?)")
+                ->execute([$ticketId, 'user', me()['id'], $content]);
+
+            // Notify admins
+            $admins = $pdo->query("SELECT id FROM users WHERE system_role='admin' OR global_role IN ('ADMIN','SUPER_ADMIN')")->fetchAll(PDO::FETCH_COLUMN);
+            foreach ($admins as $adminId) {
+                notify($pdo, (int)$adminId, 'CS', '📩 새 CS 문의: ' . $cat, mb_substr($title, 0, 50, 'UTF-8'), '?page=admin_dashboard&tab=cs&ticket_id=' . $ticketId);
+            }
+
+            flash('문의가 접수되었습니다. 티켓번호: ' . $ticketNo);
+            redirect('?page=cs&action=view&id=' . $ticketId);
+            break;
+
+        case 'cs_reply_ticket':
+            requireLogin();
+            $ticketId = (int)($_POST['ticket_id'] ?? 0);
+            $content = trim($_POST['content'] ?? '');
+            if (!$ticketId || !$content) { flash('내용을 입력하세요.', 'error'); redirect('?page=cs&action=my'); }
+
+            $ticket = $pdo->prepare("SELECT * FROM cs_tickets WHERE id=? AND user_id=?");
+            $ticket->execute([$ticketId, me()['id']]);
+            $ticket = $ticket->fetch();
+            if (!$ticket) { flash('티켓을 찾을 수 없습니다.', 'error'); redirect('?page=cs&action=my'); }
+            if (in_array($ticket['status'], ['closed','rejected'])) { flash('종료된 문의에는 답변할 수 없습니다.', 'error'); redirect('?page=cs&action=view&id='.$ticketId); }
+
+            $pdo->prepare("INSERT INTO cs_messages (ticket_id, sender_type, sender_id, content) VALUES (?,?,?,?)")
+                ->execute([$ticketId, 'user', me()['id'], $content]);
+
+            // Update status to pending if it was waiting_user
+            if ($ticket['status'] === 'waiting_user') {
+                $pdo->prepare("UPDATE cs_tickets SET status='pending' WHERE id=?")->execute([$ticketId]);
+            }
+
+            // Notify assigned admin or all admins
+            if ($ticket['assigned_admin_id']) {
+                notify($pdo, (int)$ticket['assigned_admin_id'], 'CS', '💬 CS 답변 도착', '티켓 '.$ticket['ticket_no'].' 사용자 답변', '?page=admin_dashboard&tab=cs&ticket_id='.$ticketId);
+            }
+            flash('답변이 등록되었습니다.');
+            redirect('?page=cs&action=view&id=' . $ticketId);
+            break;
+
+        case 'cs_admin_reply':
+            requireLogin();
+            if (!isAnyAdmin()) { flash('권한 없음', 'error'); redirect('?page=home'); }
+            $ticketId = (int)($_POST['ticket_id'] ?? 0);
+            $content = trim($_POST['content'] ?? '');
+            $isInternal = !empty($_POST['is_internal']);
+            if (!$ticketId || !$content) { flash('내용을 입력하세요.', 'error'); redirect('?page=admin_dashboard&tab=cs'); }
+
+            // 종료된 티켓 재답변 차단
+            $ticketStatus = $pdo->prepare("SELECT status FROM cs_tickets WHERE id=?");
+            $ticketStatus->execute([$ticketId]);
+            $tStatus = $ticketStatus->fetchColumn();
+            if ($tStatus === 'closed') {
+                flash('종료된 문의에는 답변할 수 없습니다.', 'error');
+                redirect('?page=admin_dashboard&tab=cs&ticket_id=' . $ticketId);
+            }
+
+
+            $ticket = $pdo->prepare("SELECT * FROM cs_tickets WHERE id=?");
+            $ticket->execute([$ticketId]); $ticket = $ticket->fetch();
+            if (!$ticket) { flash('티켓을 찾을 수 없습니다.', 'error'); redirect('?page=admin_dashboard&tab=cs'); }
+
+            $pdo->prepare("INSERT INTO cs_messages (ticket_id, sender_type, sender_id, content, is_internal_note) VALUES (?,?,?,?,?)")
+                ->execute([$ticketId, 'admin', me()['id'], $content, $isInternal ? 1 : 0]);
+
+            // Update status
+            if (!$isInternal) {
+                $pdo->prepare("UPDATE cs_tickets SET status='in_review', assigned_admin_id=COALESCE(assigned_admin_id,?) WHERE id=?")
+                    ->execute([me()['id'], $ticketId]);
+                // Notify user
+                notify($pdo, (int)$ticket['user_id'], 'CS', '📨 CS 답변이 도착했습니다', '티켓 '.$ticket['ticket_no'].' 관리자 답변', '?page=cs&action=view&id='.$ticketId);
+            }
+
+            $pdo->prepare("INSERT INTO cs_audit_log (ticket_id, admin_id, action, detail) VALUES (?,?,?,?)")
+                ->execute([$ticketId, me()['id'], $isInternal ? 'internal_note' : 'admin_reply', mb_substr($content, 0, 200, 'UTF-8')]);
+
+            flash($isInternal ? '내부 메모가 등록되었습니다.' : '답변이 전송되었습니다.');
+            redirect('?page=admin_dashboard&tab=cs&ticket_id=' . $ticketId);
+            break;
+
+        case 'cs_change_status':
+            requireLogin();
+            if (!isAnyAdmin()) { flash('권한 없음', 'error'); redirect('?page=home'); }
+            $ticketId = (int)($_POST['ticket_id'] ?? 0);
+            $newStatus = $_POST['new_status'] ?? '';
+            $allowed = ['pending','assigned','in_review','waiting_user','resolved','closed','rejected'];
+            if (!in_array($newStatus, $allowed)) { flash('잘못된 상태', 'error'); redirect('?page=admin_dashboard&tab=cs'); }
+
+            $ticket = $pdo->prepare("SELECT * FROM cs_tickets WHERE id=?");
+            $ticket->execute([$ticketId]); $ticket = $ticket->fetch();
+            if (!$ticket) { flash('티켓을 찾을 수 없습니다.', 'error'); redirect('?page=admin_dashboard&tab=cs'); }
+
+            // Status transition whitelist
+            $transitions = [
+                'pending'      => ['assigned','in_review','resolved','closed','rejected'],
+                'assigned'     => ['in_review','resolved','closed','rejected'],
+                'in_review'    => ['waiting_user','resolved','closed','rejected'],
+                'waiting_user' => ['in_review','resolved','closed'],
+                'resolved'     => ['closed','in_review'],
+                'closed'       => [],
+                'rejected'     => [],
+            ];
+            $currentStatus = $ticket['status'];
+            $allowedTransitions = $transitions[$currentStatus] ?? [];
+            if (!in_array($newStatus, $allowedTransitions)) {
+                flash('해당 상태로 변경할 수 없습니다. (' . $currentStatus . ' → ' . $newStatus . ')', 'error');
+                redirect('?page=admin_dashboard&tab=cs&ticket_id=' . $ticketId);
+            }
+
+            $extra = [];
+            if ($newStatus === 'resolved') $extra['resolved_at'] = date('Y-m-d H:i:s');
+            if ($newStatus === 'closed') $extra['closed_at'] = date('Y-m-d H:i:s');
+
+            $sql = "UPDATE cs_tickets SET status=?";
+            $params = [$newStatus];
+            foreach ($extra as $k => $v) { $sql .= ", $k=?"; $params[] = $v; }
+            $sql .= " WHERE id=?"; $params[] = $ticketId;
+            $pdo->prepare($sql)->execute($params);
+
+            // System message
+            $statusLabels = ['pending'=>'대기중','assigned'=>'배정됨','in_review'=>'검토중','waiting_user'=>'사용자 확인 대기','resolved'=>'해결완료','closed'=>'종료','rejected'=>'반려'];
+            $pdo->prepare("INSERT INTO cs_messages (ticket_id, sender_type, content) VALUES (?,'system',?)")
+                ->execute([$ticketId, '상태 변경: ' . ($statusLabels[$newStatus] ?? $newStatus)]);
+
+            // Notify user
+            notify($pdo, (int)$ticket['user_id'], 'CS', '📋 CS 상태 변경', '티켓 '.$ticket['ticket_no'].': '.($statusLabels[$newStatus] ?? $newStatus), '?page=cs&action=view&id='.$ticketId);
+
+            $pdo->prepare("INSERT INTO cs_audit_log (ticket_id, admin_id, action, detail) VALUES (?,?,?,?)")
+                ->execute([$ticketId, me()['id'], 'status_change', $ticket['status'] . ' -> ' . $newStatus]);
+
+            flash('상태가 변경되었습니다.');
+            redirect('?page=admin_dashboard&tab=cs&ticket_id=' . $ticketId);
+            break;
+
+        case 'cs_assign':
+            requireLogin();
+            if (!isAnyAdmin()) { flash('권한 없음', 'error'); redirect('?page=home'); }
+            $ticketId = (int)($_POST['ticket_id'] ?? 0);
+            $adminId = (int)($_POST['admin_id'] ?? me()['id']);
+            $pdo->prepare("UPDATE cs_tickets SET assigned_admin_id=?, status='assigned' WHERE id=?")
+                ->execute([$adminId, $ticketId]);
+            $pdo->prepare("INSERT INTO cs_audit_log (ticket_id, admin_id, action, detail) VALUES (?,?,?,?)")
+                ->execute([$ticketId, me()['id'], 'assign', 'Assigned to admin ID: ' . $adminId]);
+
+            flash('티켓이 배정되었습니다.');
+            redirect('?page=admin_dashboard&tab=cs&ticket_id=' . $ticketId);
+            break;
+
+        case 'cs_close_ticket':
+            requireLogin();
+            $ticketId = (int)($_POST['ticket_id'] ?? 0);
+            $t = $pdo->prepare("SELECT user_id, status FROM cs_tickets WHERE id=?");
+            $t->execute([$ticketId]); $tk = $t->fetch();
+            if (!$tk || (int)$tk['user_id'] !== (int)me()['id']) { flash('권한 없음','error'); redirect('?page=cs'); }
+            if ($tk['status'] === 'closed') { flash('이미 종료된 문의입니다.','error'); redirect('?page=cs&action=my'); }
+            $pdo->prepare("UPDATE cs_tickets SET status='closed', closed_at=NOW() WHERE id=?")->execute([$ticketId]);
+            $pdo->prepare("INSERT INTO cs_messages (ticket_id, sender_type, content) VALUES (?, 'system', '유저가 문의를 종료했습니다.')")->execute([$ticketId]);
+
+            $pdo->prepare("INSERT INTO cs_audit_log (ticket_id, admin_id, action, detail) VALUES (?,?,?,?)")
+                ->execute([$ticketId, me()['id'], 'user_close', 'User closed ticket']);
+
+            flash('문의가 종료되었습니다.');
+            redirect('?page=cs&action=my');
+            break;
+        case 'cs_reopen_ticket':
+            requireLogin();
+            $ticketId = (int)($_POST['ticket_id'] ?? 0);
+            $t = $pdo->prepare("SELECT * FROM cs_tickets WHERE id=?");
+            $t->execute([$ticketId]); $tk = $t->fetch();
+            if (!$tk || (int)$tk['user_id'] !== (int)me()['id']) { flash('권한 없음','error'); redirect('?page=cs'); }
+            if ($tk['status'] !== 'resolved') { flash('해결된 문의만 재오픈할 수 있습니다.','error'); redirect('?page=cs&action=view&id='.$ticketId); }
+
+            $pdo->prepare("UPDATE cs_tickets SET status='in_review', resolved_at=NULL WHERE id=?")->execute([$ticketId]);
+            $pdo->prepare("INSERT INTO cs_messages (ticket_id, sender_type, content) VALUES (?, 'system', '유저가 티켓을 재오픈했습니다')")->execute([$ticketId]);
+
+            // Notify assigned admin
+            if ($tk['assigned_admin_id']) {
+                notify($pdo, (int)$tk['assigned_admin_id'], 'CS', '🔄 티켓 재오픈', '티켓 '.$tk['ticket_no'].' 유저가 재오픈', '?page=admin_dashboard&tab=cs&ticket_id='.$ticketId);
+            }
+
+            $pdo->prepare("INSERT INTO cs_audit_log (ticket_id, admin_id, action, detail) VALUES (?,?,?,?)")
+                ->execute([$ticketId, me()['id'], 'user_reopen', 'User reopened resolved ticket']);
+
+            flash('문의가 재오픈되었습니다.');
+            redirect('?page=cs&action=view&id=' . $ticketId);
+            break;
+
+        // ── 공지사항 CRUD ──
+        case 'create_notice':
+            requireLogin();
+            if (!isAnyAdmin()) { flash('관리자만 가능합니다.','error'); redirect('?page=home'); }
+            $title   = mb_substr(trim($_POST['notice_title'] ?? ''), 0, 255);
+            $content = mb_substr(trim($_POST['notice_content'] ?? ''), 0, 5000);
+            $ntype   = in_array($_POST['notice_type']??'', ['info','important','event','update']) ? $_POST['notice_type'] : 'info';
+            $pinned  = !empty($_POST['is_pinned']) ? 1 : 0;
+            if (!$title || !$content) { flash('제목과 내용을 입력해주세요.','error'); redirect('?page=admin&tab=notices'); }
+            $pdo->prepare("INSERT INTO app_notices (title, content, notice_type, is_pinned, created_by) VALUES (?,?,?,?,?)")
+                ->execute([$title, $content, $ntype, $pinned, (int)me()['id']]);
+            flash('공지사항이 등록되었습니다.');
+            redirect('?page=admin&tab=notices');
+            break;
+
+        case 'update_notice':
+            requireLogin();
+            if (!isAnyAdmin()) { flash('관리자만 가능합니다.','error'); redirect('?page=home'); }
+            $nid     = (int)($_POST['notice_id'] ?? 0);
+            $title   = mb_substr(trim($_POST['notice_title'] ?? ''), 0, 255);
+            $content = mb_substr(trim($_POST['notice_content'] ?? ''), 0, 5000);
+            $ntype   = in_array($_POST['notice_type']??'', ['info','important','event','update']) ? $_POST['notice_type'] : 'info';
+            $pinned  = !empty($_POST['is_pinned']) ? 1 : 0;
+            $active  = !empty($_POST['is_active']) ? 1 : 0;
+            if (!$nid || !$title) { flash('잘못된 요청입니다.','error'); redirect('?page=admin&tab=notices'); }
+            $pdo->prepare("UPDATE app_notices SET title=?, content=?, notice_type=?, is_pinned=?, is_active=? WHERE id=?")
+                ->execute([$title, $content, $ntype, $pinned, $active, $nid]);
+            flash('공지사항이 수정되었습니다.');
+            redirect('?page=admin&tab=notices');
+            break;
+
+        case 'delete_notice':
+            requireLogin();
+            if (!isAnyAdmin()) { flash('관리자만 가능합니다.','error'); redirect('?page=home'); }
+            $nid = (int)($_POST['notice_id'] ?? 0);
+            if ($nid) $pdo->prepare("DELETE FROM app_notices WHERE id=?")->execute([$nid]);
+            flash('공지사항이 삭제되었습니다.');
+            redirect('?page=admin&tab=notices');
+            break;
+
         case 'bulk_dues_paid':
             requireLogin();
             if (!isCaptain()) { flash('캡틴만 가능합니다.', 'error'); redirect('?page=dues'); }
@@ -3689,7 +4158,7 @@ function handleAction(PDO $pdo, string $action): void {
 // PAGE RENDERER
 // ═══════════════════════════════════════════════════════════════
 function renderPage(PDO $pdo, string $page): void {
-    $auth = ['home','matches','match','team','mypage','fees','reports','admin_reports','admin_deposit','ranking','leagues','league','mercenaries','recruits','team_create','team_join','join_team','venue_verify','agreements','messages','chat','friends','team_settings','admin_dashboard','admin_master','admin','mom_vote','team_eval','sos_create','notifications','history','guide','bug_report','point_history','team_points','dues'];
+    $auth = ['home','matches','match','team','mypage','fees','reports','admin_reports','admin_deposit','ranking','leagues','league','mercenaries','recruits','team_create','team_join','join_team','venue_verify','agreements','messages','chat','friends','team_settings','admin_dashboard','admin_master','admin','mom_vote','team_eval','sos_create','notifications','history','guide','bug_report','point_history','team_points','dues','cs'];
     // [TF-25] 이의제기 페이지는 비로그인(제재유저)도 접근 가능
     if ($page === 'appeal') { pagAppeal($pdo); return; }
     if (in_array($page,$auth) && !me()) {
@@ -3772,6 +4241,7 @@ function renderPage(PDO $pdo, string $page): void {
         'team_eval'       => pagTeamEval($pdo),      // [1-2] 캡틴이 상대팀 평가
         'sos_create'      => pagSosCreate($pdo),     // [4단계] 용병 SOS 생성
         'notifications'   => pagNotifications($pdo), // 알림 목록
+        'cs'              => pagCS($pdo),            // 고객센터
         'oauth_kakao_callback' => pagKakaoCallback($pdo), // 카카오 OAuth 콜백
         'manual'          => pagManual(), // 사용설명서 (비로그인 접근 가능)
         'state_diagram'   => pagStateDiagram($pdo), // 상태전이 시각화
@@ -3835,6 +4305,51 @@ function renderHeader(PDO $pdo = null): void {
   --radius-lg:     20px;
 }
 
+/* ── 라이트모드 ── */
+body.light-mode {
+  --bg-main:       #f5f7fa;
+  --bg-surface:    #ffffff;
+  --bg-surface-alt:#eef0f4;
+  --primary:       #00c87a;
+  --primary-dim:   #00a866;
+  --primary-glow:  rgba(0,200,122,.2);
+  --danger:        #e8384f;
+  --warning:       #e5a100;
+  --info:          #2196f3;
+  --text-main:     #1a1a2e;
+  --text-sub:      #6b7280;
+  --border:        #d1d5db;
+}
+body.light-mode .topbar { background: #fff; border-bottom-color: #e5e7eb; }
+body.light-mode .topbar-brand { color: #00c87a; }
+body.light-mode .nav-bottom { background: #fff; border-top-color: #e5e7eb; }
+body.light-mode .card { background: #fff; border-color: #e5e7eb; }
+body.light-mode .btn-ghost { background: #eef0f4; color: #4b5563; }
+body.light-mode .chip { background: #eef0f4; color: #4b5563; border-color: #d1d5db; }
+body.light-mode .chip.active { background: #00c87a; color: #fff; border-color: #00c87a; }
+
+/* ── 스켈레톤 로딩 ── */
+.skeleton {
+  background: linear-gradient(90deg, rgba(255,255,255,0.03) 25%, rgba(255,255,255,0.08) 50%, rgba(255,255,255,0.03) 75%);
+  background-size: 200% 100%;
+  animation: skeleton-shimmer 1.5s infinite;
+  border-radius: 8px;
+}
+body.light-mode .skeleton {
+  background: linear-gradient(90deg, #e5e7eb 25%, #f3f4f6 50%, #e5e7eb 75%);
+  background-size: 200% 100%;
+  animation: skeleton-shimmer 1.5s infinite;
+}
+@keyframes skeleton-shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+.skeleton-text { height: 14px; margin-bottom: 8px; }
+.skeleton-title { height: 20px; width: 60%; margin-bottom: 12px; }
+.skeleton-card { height: 120px; margin-bottom: 12px; border-radius: 14px; }
+.skeleton-avatar { width: 40px; height: 40px; border-radius: 50%; }
+.skeleton-row { display: flex; gap: 10px; align-items: center; margin-bottom: 10px; }
+
 /* ── 기본 ── */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 html { scroll-behavior: smooth; }
@@ -3844,6 +4359,7 @@ body {
   font-family: 'Noto Sans KR', 'Space Grotesk', sans-serif;
   padding-bottom: 80px;
   min-height: 100vh;
+  transition: background 0.3s, color 0.3s;
 }
 /* 숫자/영문에 Space Grotesk 적용 */
 .num, h1, h2, h3, .score-box { font-family: 'Space Grotesk', 'Noto Sans KR', sans-serif; }
@@ -4042,6 +4558,10 @@ textarea.form-control { min-height: 100px; resize: vertical; }
       <span style="position:absolute;top:-4px;right:-4px;background:var(--danger);color:#fff;border-radius:999px;font-size:9px;font-weight:700;min-width:14px;height:14px;display:inline-flex;align-items:center;justify-content:center;padding:0 3px"><?=$_unreadN>99?'99+':$_unreadN?></span>
       <?php endif; ?>
     </a>
+    <button id="tfThemeToggle" onclick="tfToggleTheme()" style="background:none;border:none;color:var(--text-main);font-size:16px;cursor:pointer;padding:4px;margin-right:2px" title="다크/라이트 모드 전환">
+      <i class="bi bi-sun-fill"></i>
+    </button>
+    <script>document.addEventListener('DOMContentLoaded',function(){var b=document.getElementById('tfThemeToggle');if(b&&document.body.classList.contains('light-mode'))b.innerHTML='<i class="bi bi-moon-fill"></i>';});</script>
     <div style="text-align:right;line-height:1.3">
       <div style="font-size:13px;font-weight:700;color:var(--text-main)"><?= h(displayName(me())) ?></div>
       <?php if($myTeamInfo): ?>
@@ -4096,7 +4616,6 @@ function renderFooter(string $page): void {
       <?php endif; ?>
     </div>
     톡</a>
-  <?php if(myTeamId()): ?><a href="?page=dues" class="<?= in_array($page,['dues','fees'])?'active':'' ?>"><i class="bi bi-cash-coin"></i>회비</a><?php endif; ?>
   <a href="?page=mypage" class="<?= in_array($page,['mypage','team','team_settings'])?'active':'' ?>" style="position:relative">
     <?php $totalDot = $dot;
     if(isCaptain()&&myTeamId()){
@@ -4132,6 +4651,19 @@ function phoneInput(el){
   });
 }
 document.querySelectorAll('.phone-input').forEach(phoneInput);
+// [다크/라이트 모드] localStorage 기반 토글
+(function(){
+  var saved = localStorage.getItem('tf_theme');
+  if (saved === 'light') document.body.classList.add('light-mode');
+})();
+window.tfToggleTheme = function(){
+  document.body.classList.toggle('light-mode');
+  localStorage.setItem('tf_theme', document.body.classList.contains('light-mode') ? 'light' : 'dark');
+  // 버튼 아이콘 업데이트
+  var btn = document.getElementById('tfThemeToggle');
+  if (btn) btn.innerHTML = document.body.classList.contains('light-mode')
+    ? '<i class="bi bi-moon-fill"></i>' : '<i class="bi bi-sun-fill"></i>';
+};
 // [6단계] PWA Service Worker 등록
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
@@ -5188,6 +5720,7 @@ if (!empty($_SESSION['user_restricted'])):
       <div id="obBar1" style="flex:1;background:var(--primary);transition:0.3s"></div>
       <div id="obBar2" style="flex:1;background:rgba(255,255,255,0.06);transition:0.3s"></div>
       <div id="obBar3" style="flex:1;background:rgba(255,255,255,0.06);transition:0.3s"></div>
+      <div id="obBar4" style="flex:1;background:rgba(255,255,255,0.06);transition:0.3s"></div>
     </div>
     <div style="padding:24px 22px">
       <!-- 슬라이드 1: 팀 찾기/만들기 -->
@@ -5219,24 +5752,40 @@ if (!empty($_SESSION['user_restricted'])):
           <button type="button" onclick="obNext()" class="btn btn-ghost btn-w" style="font-size:12px;color:var(--text-sub)">다음 →</button>
         </div>
       </div>
-      <!-- 슬라이드 3: 매치 둘러보기 -->
+      <!-- 슬라이드 3: MOM 투표 & 매너 평가 -->
       <div id="obSlide3" class="ob-slide" style="display:none">
         <div style="text-align:center;margin-bottom:18px">
-          <div style="font-size:56px;line-height:1;margin-bottom:8px">⚽</div>
+          <div style="font-size:56px;line-height:1;margin-bottom:8px">&#127942;</div>
+          <div style="font-size:18px;font-weight:800;margin-bottom:6px;color:#ffb400">경기 후 MOM 투표 & 매너 평가</div>
+          <div style="font-size:13px;color:var(--text-sub);line-height:1.5">경기 후 가장 활약한 선수에게 MOM 투표하고,<br>상대팀의 매너를 평가해주세요.</div>
+        </div>
+        <div style="padding:12px;background:rgba(255,184,0,0.06);border:1px dashed rgba(255,184,0,0.3);border-radius:10px;margin-bottom:14px;font-size:11px;color:var(--text-sub);line-height:1.6">
+          &#127941; MOM에 선정되면 포인트와 뱃지를 받을 수 있어요<br>
+          &#128077; 매너 점수는 상대팀이 다시 경기하고 싶어하는 지표!<br>
+          &#128683; 노쇼/비매너 행위는 자동으로 제재됩니다
+        </div>
+        <div style="display:flex;flex-direction:column;gap:8px">
+          <button type="button" onclick="obNext()" class="btn btn-primary btn-w" style="font-size:13px">다음 &#8594;</button>
+        </div>
+      </div>
+      <!-- 슬라이드 4: 준비 완료 -->
+      <div id="obSlide4" class="ob-slide" style="display:none">
+        <div style="text-align:center;margin-bottom:18px">
+          <div style="font-size:56px;line-height:1;margin-bottom:8px">&#9917;</div>
           <div style="font-size:18px;font-weight:800;margin-bottom:6px">준비 완료!</div>
-          <div style="font-size:13px;color:var(--text-sub);line-height:1.5">내 지역의 매치를 둘러보세요.<br>매너점수·레이더차트로 신뢰할 수 있는 팀/선수를 찾을 수 있어요.</div>
+          <div style="font-size:13px;color:var(--text-sub);line-height:1.5">내 지역의 매치를 둘러보세요.<br>매너점수 / 레이더차트로 신뢰할 수 있는 팀/선수를 찾을 수 있어요.</div>
         </div>
         <div style="padding:12px;background:rgba(0,255,136,0.06);border:1px solid rgba(0,255,136,0.2);border-radius:10px;margin-bottom:14px;font-size:11px;color:var(--text-sub);line-height:1.6">
-          🎯 <strong>문제 있으면 📣 버튼으로 피드백!</strong><br>
-          🚫 노쇼/매너 위반은 자동 제재됩니다 (앱 안내 따라주세요).
+          &#127919; <strong>문제 있으면 &#128227; 버튼으로 피드백!</strong><br>
+          &#128683; 노쇼/매너 위반은 자동 제재됩니다 (앱 안내 따라주세요).
         </div>
         <form method="POST" id="obDoneForm">
           <?=csrfInput()?>
           <input type="hidden" name="action" value="mark_onboarded">
-          <button type="submit" class="btn btn-primary btn-w" style="font-size:13px">시작하기 🚀</button>
+          <button type="submit" class="btn btn-primary btn-w" style="font-size:13px">시작하기 &#128640;</button>
         </form>
       </div>
-      <!-- 건너뛰기 (1, 2 슬라이드에서만) -->
+      <!-- 건너뛰기 (1, 2, 3 슬라이드에서만) -->
       <div id="obSkipArea" style="text-align:center;margin-top:12px">
         <button type="button" onclick="obSkipAll()" style="background:none;border:none;color:var(--text-sub);font-size:11px;cursor:pointer;text-decoration:underline;text-underline-offset:2px">전체 건너뛰기</button>
       </div>
@@ -5252,12 +5801,12 @@ if (!empty($_SESSION['user_restricted'])):
 (function(){
   var step = 1;
   window.obNext = function(){
-    if (step >= 3) return;
+    if (step >= 4) return;
     document.getElementById('obSlide'+step).style.display = 'none';
     step++;
     document.getElementById('obSlide'+step).style.display = '';
     document.getElementById('obBar'+step).style.background = 'var(--primary)';
-    if (step === 3) document.getElementById('obSkipArea').style.display = 'none';
+    if (step === 4) document.getElementById('obSkipArea').style.display = 'none';
   };
   window.obSkipAll = function(){
     if (confirm('온보딩을 건너뛰시겠습니까? 언제든 FA시장/팀 페이지에서 시작할 수 있습니다.')) {
@@ -5290,9 +5839,117 @@ if (!empty($_SESSION['user_restricted'])):
     <?php if($wLine): ?><div style="font-size:12px;color:var(--text-sub);margin-top:2px"><?=$wLine?></div><?php endif; ?>
   </div>
 
-  
+  <!-- [글로벌 검색] 디바운스 AJAX 검색 -->
+  <div style="position:relative;margin-bottom:14px">
+    <div style="position:relative">
+      <i class="bi bi-search" style="position:absolute;left:12px;top:50%;transform:translateY(-50%);color:var(--text-sub);font-size:14px;pointer-events:none"></i>
+      <input type="search" id="tfGlobalSearch" placeholder="팀, 선수, 경기 검색..."
+        style="width:100%;background:var(--bg-surface);border:1px solid var(--border);border-radius:12px;padding:10px 12px 10px 36px;font-size:13px;color:var(--text-main);outline:none"
+        autocomplete="off" onfocus="this.parentElement.parentElement.querySelector('#tfSearchResults').style.display='block'"
+      >
+    </div>
+    <div id="tfSearchResults" style="display:none;position:absolute;top:100%;left:0;right:0;z-index:200;background:var(--bg-surface);border:1px solid var(--border);border-radius:12px;margin-top:4px;max-height:300px;overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,0.4)">
+      <div id="tfSearchList" style="padding:4px"></div>
+    </div>
+  </div>
+  <script>
+  (function(){
+    var input = document.getElementById('tfGlobalSearch');
+    var list = document.getElementById('tfSearchList');
+    var wrap = document.getElementById('tfSearchResults');
+    var timer = null;
+    input.addEventListener('input', function(){
+      clearTimeout(timer);
+      var q = this.value.trim();
+      if (q.length < 1) { wrap.style.display='none'; list.innerHTML=''; return; }
+      timer = setTimeout(function(){
+        fetch('?page=api&fn=global_search&q='+encodeURIComponent(q), {credentials:'same-origin'})
+          .then(function(r){return r.json()})
+          .then(function(data){
+            if (!data.ok || !data.results.length) {
+              list.innerHTML = '<div style="padding:14px;text-align:center;font-size:12px;color:var(--text-sub)">검색 결과 없음</div>';
+              wrap.style.display = 'block';
+              return;
+            }
+            var typeIcons = {team:'bi-people-fill',user:'bi-person-fill',match:'bi-calendar2-week-fill'};
+            var typeColors = {team:'#3a9ef5',user:'#00ff88',match:'#ffb400'};
+            var typeLabels = {team:'팀',user:'선수',match:'경기'};
+            var html = '';
+            data.results.forEach(function(r){
+              html += '<a href="'+r.link+'" style="display:flex;align-items:center;gap:10px;padding:10px 12px;text-decoration:none;color:inherit;border-radius:8px;transition:background 0.15s" onmouseover="this.style.background=\'rgba(255,255,255,0.05)\'" onmouseout="this.style.background=\'transparent\'">';
+              html += '<i class="bi '+r.icon+'" style="font-size:18px;color:'+typeColors[r.type]+';flex-shrink:0"></i>';
+              html += '<div style="flex:1;min-width:0"><div style="font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+r.title+'</div>';
+              html += '<div style="font-size:11px;color:var(--text-sub)">'+typeLabels[r.type]+(r.sub?' · '+r.sub:'')+'</div></div></a>';
+            });
+            list.innerHTML = html;
+            wrap.style.display = 'block';
+          });
+      }, 300);
+    });
+    document.addEventListener('click', function(e){
+      if (!input.contains(e.target) && !wrap.contains(e.target)) wrap.style.display='none';
+    });
+  })();
+  </script>
+
+  <?php
+  // [공지사항] 고정된 공지 표시
+  try {
+    $pinnedNotices = $pdo->query("SELECT id, title, content, notice_type, created_at FROM app_notices WHERE is_active=1 AND is_pinned=1 ORDER BY created_at DESC LIMIT 3")->fetchAll();
+  } catch(PDOException $e) { $pinnedNotices = []; }
+  if ($pinnedNotices):
+    $ntColors = ['info'=>'#3a9ef5','important'=>'#ff4d6d','event'=>'#ffb400','update'=>'#00ff88'];
+    $ntIcons = ['info'=>'bi-info-circle-fill','important'=>'bi-exclamation-triangle-fill','event'=>'bi-star-fill','update'=>'bi-arrow-up-circle-fill'];
+  ?>
+  <?php foreach($pinnedNotices as $pn):
+    $dismissed = 'tfNotice_'.$pn['id'];
+    $nc = $ntColors[$pn['notice_type']] ?? '#3a9ef5';
+    $ni = $ntIcons[$pn['notice_type']] ?? 'bi-info-circle-fill';
+  ?>
+  <div id="notice_<?=$pn['id']?>" class="tf-pinned-notice" style="background:rgba(<?=($pn['notice_type']==='important'?'255,77,109':($pn['notice_type']==='event'?'255,184,0':'58,158,245'))?>,.08);border:1px solid <?=$nc?>33;border-radius:12px;padding:12px 14px;margin-bottom:10px;display:flex;align-items:flex-start;gap:10px">
+    <i class="bi <?=$ni?>" style="color:<?=$nc?>;font-size:16px;flex-shrink:0;margin-top:1px"></i>
+    <div style="flex:1;min-width:0">
+      <div style="font-size:13px;font-weight:700;margin-bottom:2px"><?=h($pn['title'])?></div>
+      <div style="font-size:12px;color:var(--text-sub);line-height:1.5"><?=h(mb_substr($pn['content'],0,150))?><?=mb_strlen($pn['content'])>150?'...':''?></div>
+    </div>
+    <button onclick="this.parentElement.style.display='none';localStorage.setItem('<?=$dismissed?>','1')" style="background:none;border:none;color:var(--text-sub);font-size:14px;cursor:pointer;padding:2px;flex-shrink:0">x</button>
+  </div>
+  <script>(function(){if(localStorage.getItem('<?=$dismissed?>')==='1'){var el=document.getElementById('notice_<?=$pn['id']?>');if(el)el.style.display='none';}})();</script>
+  <?php endforeach; endif; ?>
+
+
   <?php /* ── [운영 경고 배너] 캡틴/어드민 전용 ─── */
   if (me() && isCaptain() && $myTeamId):
+    // [자동승인] 24시간 경과 시 한쪽만 입력한 결과 자동 승인
+    try {
+      $autoApproveQ = $pdo->query("
+        SELECT mrs.match_id, mrs.team_id, mrs.score_home, mrs.score_away, mrs.submitted_by
+        FROM match_result_submissions mrs
+        JOIN matches m ON m.id=mrs.match_id
+        WHERE m.status='result_pending'
+          AND mrs.created_at < DATE_SUB(NOW(), INTERVAL 24 HOUR)
+          AND (SELECT COUNT(*) FROM match_result_submissions mrs2 WHERE mrs2.match_id=mrs.match_id) = 1
+        LIMIT 5
+      ");
+      foreach ($autoApproveQ->fetchAll() as $autoR) {
+        $ex24 = $pdo->prepare("SELECT id FROM match_results WHERE match_id=? AND is_approved=1");
+        $ex24->execute([$autoR['match_id']]);
+        if (!$ex24->fetch()) {
+          $pdo->prepare("UPDATE match_results SET score_home=?, score_away=?, is_approved=1 WHERE match_id=?")
+              ->execute([(int)$autoR['score_home'], (int)$autoR['score_away'], $autoR['match_id']]);
+          $mInfo24 = $pdo->prepare("SELECT home_team_id, away_team_id FROM matches WHERE id=?");
+          $mInfo24->execute([$autoR['match_id']]); $mInfo24 = $mInfo24->fetch();
+          if ($mInfo24) {
+            foreach([(int)$mInfo24['home_team_id'], (int)$mInfo24['away_team_id']] as $tid24) {
+              $capQ24 = $pdo->prepare("SELECT user_id FROM team_members WHERE team_id=? AND role='captain' AND status='active' LIMIT 1");
+              $capQ24->execute([$tid24]); $cid24 = (int)$capQ24->fetchColumn();
+              if ($cid24) notify($pdo, $cid24, 'MATCH', '경기 결과 자동 승인 (24시간 경과)', '상대팀 미입력으로 자동 승인되었습니다.', '?page=match&id='.$autoR['match_id']);
+            }
+          }
+        }
+      }
+    } catch(PDOException $e) {}
+
     $alertItems = [];
 
     // 1. 인원 부족 경기 (7일 내, ATTEND < max_players)
@@ -5371,11 +6028,58 @@ if (!empty($_SESSION['user_restricted'])):
       } catch (PDOException $e) {}
     }
 
-    $alertItems = array_slice($alertItems, 0, 5);
+
+    // 5. 결과 대기 (양팀 입력 대기 중)
+    try {
+      $pendRes = $pdo->prepare("
+        SELECT COUNT(*) FROM matches m
+        WHERE (m.home_team_id=? OR m.away_team_id=?)
+          AND m.status IN ('in_progress','checkin_open','confirmed','open','result_pending')
+          AND m.match_date <= CURDATE()
+          AND NOT EXISTS (SELECT 1 FROM match_result_submissions mrs WHERE mrs.match_id=m.id AND mrs.team_id=?)
+      ");
+      $pendRes->execute([$myTeamId, $myTeamId, $myTeamId]);
+      $pendResCount = (int)$pendRes->fetchColumn();
+      if ($pendResCount > 0) {
+        $alertItems[] = [
+          'icon' => '📊',
+          'msg'  => '결과 대기 '.$pendResCount.'건 — 결과를 입력해주세요',
+          'link' => '?page=matches',
+          'color'=> '#38bdf8',
+        ];
+      }
+    } catch (PDOException $e) {}
+
+    // 6. 팀원 관련 신고 (CS 티켓에서 팀원이 피신고된 건)
+    try {
+      $tmIdStmt6 = $pdo->prepare("SELECT user_id FROM team_members WHERE team_id=? AND status='active'");
+      $tmIdStmt6->execute([$myTeamId]);
+      $tmIds6 = array_column($tmIdStmt6->fetchAll(), 'user_id');
+      if ($tmIds6) {
+        $ph6 = implode(",", array_fill(0, count($tmIds6), "?"));
+        $rpQ6 = $pdo->prepare("SELECT COUNT(*) FROM cs_tickets WHERE category_code IN ('report','tos_report') AND related_user_id IN ($ph6) AND status NOT IN ('resolved','closed','rejected')");
+        $rpQ6->execute($tmIds6);
+        $teamRptCnt = (int)$rpQ6->fetchColumn();
+        if ($teamRptCnt > 0) {
+          $alertItems[] = ['icon'=>'\xf0\x9f\x9a\xa8', 'msg'=>'팀원 관련 신고 '.$teamRptCnt.'건', 'link'=>'?page=cs&action=team', 'color'=>'#e74c3c'];
+        }
+      }
+    } catch (PDOException $e) {}
+
+        $alertItems = array_slice($alertItems, 0, 5);
   endif;
   if (!empty($alertItems)): ?>
   <div style="margin-bottom:14px">
-    <div style="font-size:13px;font-weight:700;color:#ffb400;margin-bottom:8px"><i class="bi bi-exclamation-triangle-fill"></i> 운영 알림</div>
+    <div id="tf-ops-alert-collapsed" onclick="toggleOpsAlert()" style="display:none;cursor:pointer;background:rgba(255,180,0,0.08);border:1px solid rgba(255,180,0,0.25);border-radius:10px;padding:10px 14px;align-items:center;gap:8px;margin-bottom:8px">
+      <span style="font-size:14px">⚠️</span>
+      <span style="font-size:12px;font-weight:600;color:#ffb400">운영 알림 <?=count($alertItems)?>건</span>
+      <i class="bi bi-chevron-down" style="margin-left:auto;color:var(--text-sub);font-size:12px"></i>
+    </div>
+    <div id="tf-ops-alert-expanded">
+    <div style="font-size:13px;font-weight:700;color:#ffb400;margin-bottom:8px;display:flex;align-items:center;gap:6px">
+      <span><i class="bi bi-exclamation-triangle-fill"></i> 운영 알림</span>
+      <span onclick="toggleOpsAlert()" style="cursor:pointer;margin-left:auto;font-size:11px;color:var(--text-sub);font-weight:400;padding:2px 8px;border:1px solid rgba(255,255,255,0.1);border-radius:12px">접기 <i class="bi bi-chevron-up"></i></span>
+    </div>
     <?php foreach($alertItems as $ai): ?>
     <a href="<?=$ai['link']?>" style="text-decoration:none;display:block;margin-bottom:6px">
       <div style="background:rgba(255,180,0,0.08);border:1px solid rgba(255,180,0,0.25);border-radius:10px;padding:10px 14px;display:flex;align-items:center;gap:10px;transition:background 0.2s" onmouseover="this.style.background='rgba(255,180,0,0.15)'" onmouseout="this.style.background='rgba(255,180,0,0.08)'">
@@ -5385,6 +6089,11 @@ if (!empty($_SESSION['user_restricted'])):
       </div>
     </a>
     <?php endforeach; ?>
+  </div><!-- /tf-ops-alert-expanded -->
+  <script>
+  function toggleOpsAlert(){var exp=document.getElementById('tf-ops-alert-expanded');var col=document.getElementById('tf-ops-alert-collapsed');if(exp.style.display==='none'){exp.style.display='';col.style.display='none';localStorage.removeItem('tf_ops_alert_collapsed');}else{exp.style.display='none';col.style.display='flex';localStorage.setItem('tf_ops_alert_collapsed','1');}}
+  (function(){if(localStorage.getItem('tf_ops_alert_collapsed')==='1'){var exp=document.getElementById('tf-ops-alert-expanded');var col=document.getElementById('tf-ops-alert-collapsed');if(exp&&col){exp.style.display='none';col.style.display='flex';}}})();
+  </script>
   </div>
   <?php endif; ?>
 
@@ -5822,6 +6531,53 @@ if (!empty($_SESSION['user_restricted'])):
     </div>
   </div>
   <?php endforeach;endif; ?>
+
+  <!-- [활동 피드 / 타임라인] AJAX 로드 -->
+  <div style="margin-top:16px;margin-bottom:14px">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+      <span style="font-size:14px;font-weight:700"><i class="bi bi-activity" style="color:var(--primary);margin-right:4px"></i> 최근 활동</span>
+      <button onclick="loadActivityFeed()" class="btn btn-ghost btn-sm" style="font-size:11px;padding:4px 10px;min-height:24px"><i class="bi bi-arrow-clockwise"></i></button>
+    </div>
+    <div id="tfActivityFeed">
+      <!-- 스켈레톤 로딩 -->
+      <div class="skeleton-row"><div class="skeleton skeleton-avatar"></div><div style="flex:1"><div class="skeleton skeleton-text" style="width:80%"></div><div class="skeleton skeleton-text" style="width:50%"></div></div></div>
+      <div class="skeleton-row"><div class="skeleton skeleton-avatar"></div><div style="flex:1"><div class="skeleton skeleton-text" style="width:70%"></div><div class="skeleton skeleton-text" style="width:40%"></div></div></div>
+      <div class="skeleton-row"><div class="skeleton skeleton-avatar"></div><div style="flex:1"><div class="skeleton skeleton-text" style="width:90%"></div><div class="skeleton skeleton-text" style="width:55%"></div></div></div>
+    </div>
+  </div>
+  <script>
+  function loadActivityFeed() {
+    var container = document.getElementById('tfActivityFeed');
+    container.innerHTML = '<div class="skeleton-row"><div class="skeleton skeleton-avatar"></div><div style="flex:1"><div class="skeleton skeleton-text" style="width:80%"></div><div class="skeleton skeleton-text" style="width:50%"></div></div></div>'.repeat(3);
+    fetch('?page=api&fn=activity_feed', {credentials:'same-origin'})
+      .then(function(r){return r.json()})
+      .then(function(data){
+        if (!data.ok || !data.items || !data.items.length) {
+          container.innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-sub);font-size:12px">아직 활동 내역이 없습니다.</div>';
+          return;
+        }
+        var html = '';
+        data.items.forEach(function(item) {
+          var ago = item.time ? timeAgoJS(item.time) : '';
+          html += '<a href="'+(item.link||'#')+'" style="display:flex;align-items:flex-start;gap:10px;padding:8px 0;text-decoration:none;color:inherit;border-bottom:1px solid rgba(255,255,255,0.04)">';
+          html += '<div style="width:32px;height:32px;border-radius:50%;background:'+item.color+'20;display:flex;align-items:center;justify-content:center;flex-shrink:0"><i class="bi '+item.icon+'" style="color:'+item.color+';font-size:14px"></i></div>';
+          html += '<div style="flex:1;min-width:0"><div style="font-size:12px;line-height:1.5;color:var(--text-main)">'+item.msg+'</div>';
+          html += '<div style="font-size:10px;color:var(--text-sub);margin-top:2px">'+ago+'</div></div></a>';
+        });
+        container.innerHTML = html;
+      })
+      .catch(function(){ container.innerHTML = '<div style="text-align:center;padding:15px;color:var(--text-sub);font-size:12px">로드 실패</div>'; });
+  }
+  function timeAgoJS(dt) {
+    var diff = Math.floor((Date.now() - new Date(dt).getTime()) / 1000);
+    if (diff < 60) return '방금 전';
+    if (diff < 3600) return Math.floor(diff/60) + '분 전';
+    if (diff < 86400) return Math.floor(diff/3600) + '시간 전';
+    if (diff < 604800) return Math.floor(diff/86400) + '일 전';
+    return dt.substring(0,10);
+  }
+  loadActivityFeed();
+  </script>
 
   <?php if(isCaptain()): ?>
   <hr class="divider">
@@ -6799,6 +7555,21 @@ function pagMatchDetail(PDO $pdo): void {
           <input type="number" name="away_score" class="form-control" style="text-align:center;font-size:28px;font-family:'Space Grotesk',sans-serif;font-weight:700" value="<?=(int)($result['score_away']??0)?>" min="0" required></div>
       </div>
       <button type="submit" class="btn btn-primary btn-w"><?=$result ? '결과 수정' : '결과 등록'?></button>
+    <?php
+    // Show dual-submission status
+    try {
+      $subSt = $pdo->prepare("SELECT team_id FROM match_result_submissions WHERE match_id=?");
+      $subSt->execute([$id]); $submittedTeams = array_column($subSt->fetchAll(), 'team_id');
+      $mySubmitted = in_array($myTeam, $submittedTeams);
+      $oppTid = ($myTeam == $match['home_team_id']) ? $match['away_team_id'] : $match['home_team_id'];
+      $oppSubmitted = in_array($oppTid, $submittedTeams);
+    } catch(PDOException $e) { $mySubmitted = false; $oppSubmitted = false; }
+    if ($mySubmitted || $oppSubmitted): ?>
+    <div style="margin-top:10px;padding:8px 12px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:8px;font-size:12px;display:flex;gap:12px;justify-content:center">
+      <span style="color:<?=$mySubmitted?'#00ff88':'#ffb400'?>"><?=$mySubmitted?'우리팀 ✅ 입력완료':'우리팀 ⏳ 미입력'?></span>
+      <span style="color:<?=$oppSubmitted?'#00ff88':'#ffb400'?>"><?=$oppSubmitted?'상대팀 ✅ 입력완료':'상대팀 ⏳ 대기중'?></span>
+    </div>
+    <?php endif; ?>
     </form>
 
     <!-- [개인 기록] 골/어시/경고/퇴장 — 스코어와 별도로 항상 표시 -->
@@ -9512,6 +10283,11 @@ function pagMypage(PDO $pdo): void {
       <span style="color:var(--text-sub)">›</span>
     </a>
     <?php endif; ?>
+    <a href="?page=cs" style="display:flex;align-items:center;gap:10px;padding:12px 16px;border-bottom:1px solid rgba(255,255,255,0.04)">
+      <span style="font-size:18px">🎧</span>
+      <div style="flex:1"><div style="font-size:13px;font-weight:600">고객센터</div><div style="font-size:11px;color:var(--text-sub)">문의/신고/건의/제휴</div></div>
+      <span style="color:var(--text-sub)">›</span>
+    </a>
     <a href="?page=bug_report" style="display:flex;align-items:center;gap:10px;padding:12px 16px;border-bottom:1px solid rgba(255,255,255,0.04)">
       <span style="font-size:18px">🐛</span>
       <div style="flex:1"><div style="font-size:13px;font-weight:600">버그/오류 신고</div><div style="font-size:11px;color:var(--text-sub)">신고하면 포인트 적립!</div></div>
@@ -10239,7 +11015,7 @@ function pagFees(PDO $pdo): void {
         ORDER BY FIELD(tm.role,'owner','president','director','captain','vice_captain','manager','coach','treasurer','analyst','doctor','player'), u.name
     ");
     $mbs->execute([$tid]);$mbs=$mbs->fetchAll();
-    $roleLabels = ['owner'=>'구단주','captain'=>'주장','vice_captain'=>'부주장','manager'=>'매니저','coach'=>'코치','treasurer'=>'총무','analyst'=>'전력분석','doctor'=>'팀닥터','player'=>'선수','president'=>'회장','director'=>'감독'];
+    $roleLabels = ['owner'=>'구단주','captain'=>'주장','vice_captain'=>'부주장','manager'=>'매니저','coach'=>'감독','treasurer'=>'총무','analyst'=>'전력분석','doctor'=>'팀닥터','player'=>'선수','president'=>'회장','director'=>'단장'];
     $roleColors = ['owner'=>'#00ff88','captain'=>'#ffd60a','vice_captain'=>'#ff9500','manager'=>'#3a9ef5','coach'=>'#9b59b6','treasurer'=>'#e67e22','analyst'=>'#1abc9c','doctor'=>'#e84393','player'=>'rgba(255,255,255,0.4)','president'=>'#00ff88','director'=>'#e74c3c'];
     $posShort = ['GK'=>'GK','DF'=>'DF','MF'=>'MF','FW'=>'FW','CB'=>'CB','LB'=>'LB','RB'=>'RB','CDM'=>'CDM','CM'=>'CM','LM'=>'LM','RM'=>'RM','CAM'=>'CAM','LW'=>'LW','ST'=>'ST','RW'=>'RW'];
 
@@ -13202,6 +13978,51 @@ function pagTeamSettings(PDO $pdo): void {
       <button type="submit" class="btn btn-primary btn-w">저장</button>
     </form>
   </div></div>
+
+  <!-- 운영진에게 직통 문의 -->
+  <div class="card" style="margin-top:14px;border:1px solid rgba(0,200,83,0.2)">
+    <div class="card-body" style="text-align:center;padding:16px">
+      <div style="font-size:14px;font-weight:700;margin-bottom:8px">📩 운영진에게 문의</div>
+      <div style="font-size:12px;color:var(--text-sub);margin-bottom:12px">팀 운영 관련 문의를 운영진에게 직접 전달합니다</div>
+      <a href="?page=cs&action=new&cat=team_mgmt&team_prefill=1" class="btn btn-primary" style="font-size:13px;padding:10px 20px">
+        <i class="bi bi-headset"></i> 운영진에게 문의하기
+      </a>
+    </div>
+  </div>
+
+  <!-- 팀원 CS 현황 -->
+  <?php
+  $memberTickets = $pdo->prepare("
+    SELECT u.id, u.name, u.nickname, COUNT(t.id) AS open_tickets
+    FROM team_members tm
+    JOIN users u ON u.id=tm.user_id
+    LEFT JOIN cs_tickets t ON t.user_id=u.id AND t.status NOT IN ('resolved','closed','rejected')
+    WHERE tm.team_id=? AND tm.status='active'
+    GROUP BY u.id
+    HAVING open_tickets > 0
+    ORDER BY open_tickets DESC
+  ");
+  $memberTickets->execute([$tid]);
+  $mtRows = $memberTickets->fetchAll();
+  if ($mtRows): ?>
+  <div class="card" style="margin-top:14px">
+    <div class="card-body">
+      <div style="font-size:14px;font-weight:700;margin-bottom:10px">📊 팀원 문의 현황</div>
+      <div style="font-size:11px;color:var(--text-sub);margin-bottom:10px">현재 처리 중인 문의가 있는 팀원</div>
+      <?php foreach($mtRows as $mt): ?>
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 0;border-bottom:1px solid rgba(255,255,255,0.05)">
+        <span style="font-size:13px"><?=h($mt['nickname'] ?: $mt['name'])?></span>
+        <span style="font-size:12px;font-weight:700;color:var(--warning)"><?=(int)$mt['open_tickets']?>건</span>
+      </div>
+      <?php endforeach; ?>
+    </div>
+  </div>
+  <?php endif; ?>
+
+  <!-- 팀 관련 CS 티켓 바로가기 -->
+  <div style="margin-top:14px;text-align:center">
+    <a href="?page=cs&action=team" class="btn btn-outline" style="font-size:13px">팀 관련 문의 보기</a>
+  </div>
 </div>
 <?php }
 
@@ -14232,7 +15053,7 @@ function pagAdmin(PDO $pdo): void {
     }
 
     // [라우팅] 서브탭 파라미터 (기본: dashboard)
-    $allowedTabs = ['dashboard','verify','reports','matches','users','feedback','bugs'];
+    $allowedTabs = ['dashboard','verify','reports','matches','users','feedback','bugs','notices'];
     $tab = $_GET['tab'] ?? 'dashboard';
     if (!in_array($tab, $allowedTabs, true)) $tab = 'dashboard';
 
@@ -14243,6 +15064,7 @@ function pagAdmin(PDO $pdo): void {
         'matches'  => (int)$pdo->query("SELECT COUNT(*) FROM matches WHERE status IN ('disputed','result_pending')")->fetchColumn(),
         'feedback' => (int)$pdo->query("SELECT COUNT(*) FROM feedback WHERE status='NEW'")->fetchColumn(),
         'bugs'     => (int)$pdo->query("SELECT COUNT(*) FROM bug_reports WHERE status='pending'")->fetchColumn(),
+        'notices'  => (int)$pdo->query("SELECT COUNT(*) FROM app_notices WHERE is_active=1")->fetchColumn(),
     ];
 ?>
 <div class="container">
@@ -14268,6 +15090,7 @@ function pagAdmin(PDO $pdo): void {
         'users'     => ['유저', null],
         'feedback'  => ['피드백', $pendingCounts['feedback']],
         'bugs'      => ['버그', $pendingCounts['bugs']],
+        'notices'   => ['공지', $pendingCounts['notices']],
       ];
       foreach ($tabInfo as $tk => [$label, $badgeNum]):
     ?>
@@ -15310,6 +16133,99 @@ function pagAdmin(PDO $pdo): void {
 
   </script>
 
+  <?php elseif ($tab === 'notices'):
+    // ── 공지사항 관리 탭 ───────────────────────────────
+    $notices = $pdo->query("SELECT n.*, u.name AS author_name FROM app_notices n LEFT JOIN users u ON u.id=n.created_by ORDER BY n.is_pinned DESC, n.created_at DESC")->fetchAll();
+    $editId = (int)($_GET['edit_notice'] ?? 0);
+    $editNotice = null;
+    if ($editId) {
+        foreach ($notices as $n) { if ((int)$n['id'] === $editId) { $editNotice = $n; break; } }
+    }
+    $typeLabels = ['info'=>'안내','important'=>'중요','event'=>'이벤트','update'=>'업데이트'];
+    $typeColors = ['info'=>'#3a9ef5','important'=>'#ff4d6d','event'=>'#ffb400','update'=>'#00ff88'];
+  ?>
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+    <h3 style="font-size:15px;font-weight:700;margin:0">공지사항 관리</h3>
+    <button onclick="document.getElementById('noticeForm').style.display=document.getElementById('noticeForm').style.display==='none'?'block':'none'" class="btn btn-primary btn-sm" style="font-size:12px;padding:6px 14px;min-height:32px">+ 새 공지</button>
+  </div>
+
+  <!-- 공지 작성/수정 폼 -->
+  <div id="noticeForm" class="card" style="margin-bottom:14px;<?=$editNotice?'':'display:none'?>">
+    <div class="card-body">
+      <form method="POST">
+        <?=csrfInput()?>
+        <input type="hidden" name="action" value="<?=$editNotice?'update_notice':'create_notice'?>">
+        <?php if($editNotice): ?><input type="hidden" name="notice_id" value="<?=$editNotice['id']?>"><?php endif; ?>
+        <div style="margin-bottom:10px">
+          <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px">제목</label>
+          <input type="text" name="notice_title" value="<?=h($editNotice['title']??'')?>" class="form-control" required maxlength="255" placeholder="공지 제목">
+        </div>
+        <div style="margin-bottom:10px">
+          <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px">내용</label>
+          <textarea name="notice_content" class="form-control" rows="4" required placeholder="공지 내용"><?=h($editNotice['content']??'')?></textarea>
+        </div>
+        <div style="display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap">
+          <div style="flex:1;min-width:120px">
+            <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px">타입</label>
+            <select name="notice_type" class="form-control">
+              <?php foreach($typeLabels as $k=>$v): ?>
+              <option value="<?=$k?>" <?=($editNotice['notice_type']??'')===$k?'selected':''?>><?=$v?></option>
+              <?php endforeach; ?>
+            </select>
+          </div>
+          <label style="display:flex;align-items:center;gap:6px;padding-top:20px;font-size:12px;cursor:pointer">
+            <input type="checkbox" name="is_pinned" value="1" <?=($editNotice['is_pinned']??0)?'checked':''?>> 고정
+          </label>
+          <?php if($editNotice): ?>
+          <label style="display:flex;align-items:center;gap:6px;padding-top:20px;font-size:12px;cursor:pointer">
+            <input type="checkbox" name="is_active" value="1" <?=($editNotice['is_active']??1)?'checked':''?>> 활성
+          </label>
+          <?php endif; ?>
+        </div>
+        <div style="display:flex;gap:6px">
+          <button type="submit" class="btn btn-primary btn-sm" style="font-size:12px;padding:6px 16px;min-height:32px"><?=$editNotice?'수정':'등록'?></button>
+          <?php if($editNotice): ?>
+          <a href="?page=admin&tab=notices" class="btn btn-ghost btn-sm" style="font-size:12px;padding:6px 16px;min-height:32px">취소</a>
+          <?php endif; ?>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- 공지 목록 -->
+  <?php if(!$notices): ?>
+  <div class="card"><div class="card-body" style="text-align:center;color:var(--text-sub);font-size:13px;padding:30px">공지사항이 없습니다.</div></div>
+  <?php else: ?>
+  <?php foreach($notices as $n):
+    $nc = $typeColors[$n['notice_type']] ?? '#3a9ef5';
+  ?>
+  <div class="card" style="margin-bottom:8px;border-left:3px solid <?=$nc?>;<?=$n['is_active']?'':'opacity:0.5'?>">
+    <div class="card-body" style="padding:12px 14px">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px">
+        <div style="flex:1;min-width:0">
+          <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">
+            <?php if($n['is_pinned']): ?><span style="font-size:12px">&#128204;</span><?php endif; ?>
+            <span class="badge" style="background:<?=$nc?>;color:#fff;font-size:9px"><?=$typeLabels[$n['notice_type']]??'안내'?></span>
+            <?php if(!$n['is_active']): ?><span class="badge badge-gray" style="font-size:9px">비활성</span><?php endif; ?>
+          </div>
+          <div style="font-weight:700;font-size:14px;margin-bottom:2px"><?=h($n['title'])?></div>
+          <div style="font-size:12px;color:var(--text-sub);line-height:1.5;white-space:pre-line"><?=h(mb_substr($n['content'],0,200))?><?=mb_strlen($n['content'])>200?'...':''?></div>
+          <div style="font-size:10px;color:var(--text-sub);margin-top:6px"><?=h($n['author_name']??'관리자')?> | <?=$n['created_at']?></div>
+        </div>
+        <div style="display:flex;gap:4px;flex-shrink:0">
+          <a href="?page=admin&tab=notices&edit_notice=<?=$n['id']?>" class="btn btn-ghost btn-sm" style="font-size:11px;padding:4px 8px;min-height:28px"><i class="bi bi-pencil"></i></a>
+          <form method="POST" style="display:inline" onsubmit="return confirm('삭제하시겠습니까?')">
+            <?=csrfInput()?>
+            <input type="hidden" name="action" value="delete_notice">
+            <input type="hidden" name="notice_id" value="<?=$n['id']?>">
+            <button type="submit" class="btn btn-ghost btn-sm" style="font-size:11px;padding:4px 8px;min-height:28px;color:var(--danger)"><i class="bi bi-trash"></i></button>
+          </form>
+        </div>
+      </div>
+    </div>
+  </div>
+  <?php endforeach; endif; ?>
+
   <?php endif; ?>
 
   <div style="margin-top:20px;padding:10px;background:rgba(255,77,109,0.05);border:1px dashed rgba(255,77,109,0.2);border-radius:10px;font-size:11px;color:var(--text-sub);text-align:center">
@@ -15544,6 +16460,7 @@ function pagAdminDashboard(PDO $pdo): void {
             'pending_reports'   => "SELECT COUNT(*) FROM reports WHERE status='PENDING' OR status IS NULL",
             'pending_venues'    => "SELECT COUNT(*) FROM venue_verifications WHERE status='pending'",
             'pending_appeals'   => "SELECT COUNT(*) FROM user_appeals WHERE status='pending'",
+            'pending_cs'        => "SELECT COUNT(*) FROM cs_tickets WHERE status IN ('pending','assigned')",
         ];
         foreach ($queries as $k => $q) {
             try { $stats[$k] = (int)$pdo->query($q)->fetchColumn(); }
@@ -15585,6 +16502,16 @@ function pagAdminDashboard(PDO $pdo): void {
             $stmt = $pdo->prepare("SELECT vv.*,u.name AS submitter_name,m.title AS match_title FROM venue_verifications vv JOIN users u ON u.id=vv.submitted_by JOIN matches m ON m.id=vv.match_id WHERE vv.status='pending' ORDER BY vv.submitted_at DESC");
             $stmt->execute(); $data = $stmt->fetchAll();
             break;
+        case 'cs':
+            $csFilter = $_GET['cs_status'] ?? '';
+            $csCat = $_GET['cs_cat'] ?? '';
+            $csWhere = 'WHERE 1=1';
+            $csParams = [];
+            if ($csFilter) { $csWhere .= ' AND t.status=?'; $csParams[] = $csFilter; }
+            if ($csCat) { $csWhere .= ' AND t.category_code=?'; $csParams[] = $csCat; }
+            $stmt = $pdo->prepare("SELECT t.*, u.name AS user_name, au.name AS admin_name FROM cs_tickets t JOIN users u ON u.id=t.user_id LEFT JOIN users au ON au.id=t.assigned_admin_id $csWhere ORDER BY FIELD(t.priority,'urgent','high','normal','low'), t.created_at DESC LIMIT 100");
+            $stmt->execute($csParams); $data = $stmt->fetchAll();
+            break;
         case 'appeals':
             $stmt = $pdo->prepare("SELECT a.*, u.name AS user_name, u.phone AS user_phone, u.restricted_until, u.ban_reason FROM user_appeals a JOIN users u ON u.id=a.user_id ORDER BY FIELD(a.status,'pending','rejected','approved'), a.created_at DESC LIMIT 50");
             $stmt->execute(); $data = $stmt->fetchAll();
@@ -15598,7 +16525,7 @@ function pagAdminDashboard(PDO $pdo): void {
 
   <!-- 탭 -->
   <div class="chip-row" style="margin-bottom:16px;overflow-x:auto">
-    <?php foreach(['overview'=>'개요','users'=>'유저','teams'=>'팀','matches'=>'경기','reports'=>'신고','venues'=>'인증','appeals'=>'이의제기'] as $k=>$v): ?>
+    <?php foreach(['overview'=>'개요','users'=>'유저','teams'=>'팀','matches'=>'경기','reports'=>'신고','venues'=>'인증','appeals'=>'이의제기','cs'=>'CS센터'] as $k=>$v): ?>
     <a href="?page=admin_dashboard&tab=<?=$k?>" class="chip <?=$tab===$k?'active':''?>"><?=$v?></a>
     <?php endforeach; ?>
   </div>
@@ -15787,6 +16714,195 @@ function pagAdminDashboard(PDO $pdo): void {
   </div>
   <?php endforeach; ?>
   
+
+  <?php elseif($tab === 'cs'): ?>
+  <?php
+    $ticketId = (int)($_GET['ticket_id'] ?? 0);
+    if ($ticketId):
+      // Single ticket detail view (admin)
+      $ticket = $pdo->prepare("SELECT t.*, u.name AS user_name, u.phone AS user_phone, c.icon, c.name AS cat_name FROM cs_tickets t JOIN users u ON u.id=t.user_id JOIN cs_categories c ON c.code=t.category_code WHERE t.id=?");
+      $ticket->execute([$ticketId]); $ticket = $ticket->fetch();
+      if ($ticket):
+        $msgs = $pdo->prepare("SELECT m.*, u.name AS sender_name FROM cs_messages m LEFT JOIN users u ON u.id=m.sender_id WHERE m.ticket_id=? ORDER BY m.created_at ASC");
+        $msgs->execute([$ticketId]); $msgs = $msgs->fetchAll();
+        $statusLabels = ['pending'=>'대기중','assigned'=>'배정됨','in_review'=>'검토중','waiting_user'=>'사용자확인대기','resolved'=>'해결완료','closed'=>'종료','rejected'=>'반려'];
+  ?>
+  <a href="?page=admin_dashboard&tab=cs" style="font-size:12px;color:var(--primary);margin-bottom:12px;display:inline-block"><i class="bi bi-arrow-left"></i> 목록으로</a>
+  <div class="card" style="margin-bottom:12px">
+    <div class="card-body" style="padding:12px">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start">
+        <div>
+          <div style="font-size:11px;color:var(--text-sub)"><?=h($ticket['ticket_no'])?> · <?=h($ticket['icon'])?> <?=h($ticket['cat_name'])?></div>
+          <div style="font-size:15px;font-weight:700;margin-top:4px"><?=h($ticket['title'])?></div>
+          <div style="font-size:12px;color:var(--text-sub);margin-top:4px">👤 <?=h($ticket['user_name'])?> (<?=h($ticket['user_phone'])?>)</div>
+          <div style="font-size:11px;color:var(--text-sub);margin-top:2px"><?=date('Y.m.d H:i', strtotime($ticket['created_at']))?></div>
+        </div>
+        <div>
+          <span style="font-size:10px;font-weight:700;padding:4px 8px;border-radius:99px;background:rgba(255,255,255,0.08);color:var(--<?=match($ticket['priority']){'urgent'=>'danger','high'=>'warning',default=>'info'}?>)"><?=strtoupper($ticket['priority'])?></span>
+        </div>
+      </div>
+      <?php if ($ticket['image_url']): ?>
+      <?php $dlUrlAdmin = "?page=cs&action=download&ticket_id=" . $ticket['id'] . "&file=" . urlencode(basename($ticket['image_url'])); ?>
+      <div style="margin-top:8px"><img src="<?=h($dlUrlAdmin)?>" style="max-width:100%;border-radius:8px;max-height:200px"></div>
+      <?php endif; ?>
+    </div>
+  </div>
+
+  <!-- Status Change -->
+  <div class="card" style="margin-bottom:12px">
+    <div class="card-body" style="padding:10px 12px;display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+      <span style="font-size:11px;color:var(--text-sub)">상태:</span>
+      <form method="POST" style="display:flex;gap:6px;flex:1;flex-wrap:wrap">
+        <?=csrfInput()?>
+        <input type="hidden" name="action" value="cs_change_status">
+        <input type="hidden" name="ticket_id" value="<?=$ticket['id']?>">
+        <select name="new_status" class="form-control" style="font-size:11px;padding:4px 8px;flex:1;min-width:100px">
+          <?php foreach($statusLabels as $k=>$v): ?>
+          <option value="<?=$k?>" <?=$ticket['status']===$k?'selected':''?>><?=$v?></option>
+          <?php endforeach; ?>
+        </select>
+        <button type="submit" class="btn btn-sm btn-outline" style="font-size:11px;padding:4px 10px">변경</button>
+      </form>
+      <form method="POST">
+        <?=csrfInput()?>
+        <input type="hidden" name="action" value="cs_assign">
+        <input type="hidden" name="ticket_id" value="<?=$ticket['id']?>">
+        <button type="submit" class="btn btn-sm btn-primary" style="font-size:11px;padding:4px 10px">나에게 배정</button>
+      </form>
+    </div>
+  </div>
+
+  <!-- Messages -->
+  <div style="margin-bottom:16px">
+    <?php foreach ($msgs as $msg): ?>
+    <?php if ($msg['sender_type'] === 'system'): ?>
+    <div style="text-align:center;margin:10px 0"><span style="font-size:10px;color:var(--text-sub);background:rgba(255,255,255,0.05);padding:3px 10px;border-radius:99px"><?=h($msg['content'])?></span></div>
+    <?php elseif ($msg['sender_type'] === 'admin'): ?>
+    <div style="display:flex;justify-content:flex-start;margin:8px 0">
+      <div style="max-width:85%">
+        <div style="font-size:10px;color:var(--info);margin-bottom:2px"><?=h($msg['sender_name'] ?? '관리자')?> <?=$msg['is_internal_note']?'<span style="color:#f0ad4e">[내부메모]</span>':''?></div>
+        <div style="background:<?=$msg['is_internal_note']?'rgba(240,173,78,0.12);border:1px solid rgba(240,173,78,0.3)':'rgba(13,110,253,0.15);border:1px solid rgba(13,110,253,0.25)'?>;border-radius:10px 10px 10px 4px;padding:8px 12px;font-size:12px;line-height:1.5"><?=nl2br(h($msg['content']))?></div>
+        <div style="font-size:10px;color:var(--text-sub);margin-top:2px"><?=date('m.d H:i', strtotime($msg['created_at']))?></div>
+      </div>
+    </div>
+    <?php else: ?>
+    <div style="display:flex;justify-content:flex-end;margin:8px 0">
+      <div style="max-width:85%">
+        <div style="font-size:10px;color:var(--text-sub);text-align:right;margin-bottom:2px"><?=h($msg['sender_name'] ?? '유저')?></div>
+        <div style="background:rgba(0,200,83,0.12);border:1px solid rgba(0,200,83,0.25);border-radius:10px 10px 4px 10px;padding:8px 12px;font-size:12px;line-height:1.5"><?=nl2br(h($msg['content']))?></div>
+        <div style="font-size:10px;color:var(--text-sub);margin-top:2px;text-align:right"><?=date('m.d H:i', strtotime($msg['created_at']))?></div>
+      </div>
+    </div>
+    <?php endif; ?>
+    <?php endforeach; ?>
+  </div>
+
+  <!-- Admin Reply -->
+  <div class="card">
+    <div class="card-body" style="padding:12px">
+      <form method="POST">
+        <?=csrfInput()?>
+        <input type="hidden" name="action" value="cs_admin_reply">
+        <input type="hidden" name="ticket_id" value="<?=$ticket['id']?>">
+        <select id="csTemplate" class="form-control" style="font-size:11px;margin-bottom:6px;color:var(--text-sub)" onchange="if(this.value){document.querySelector('[name=content]').value=this.value;this.selectedIndex=0;}">
+          <option value="">📋 빠른 답변 템플릿 선택...</option>
+          <option value="접수 확인했습니다. 검토 후 답변드리겠습니다.">접수 확인 안내</option>
+          <option value="추가 정보가 필요합니다. 스크린샷이나 상세 내용을 첨부해주세요.">추가 정보 요청</option>
+          <option value="확인 결과 정상 동작하고 있습니다. 다른 문의사항이 있으시면 새 문의를 등록해주세요.">정상 동작 안내</option>
+          <option value="해당 건은 조치 완료되었습니다. 불편을 드려 죄송합니다.">조치 완료</option>
+          <option value="신고해주신 내용 확인했습니다. 해당 유저에게 경고 조치하였습니다.">신고 경고 조치</option>
+          <option value="위반 사항이 확인되지 않았습니다.">위반 미확인</option>
+          <option value="건의해주신 내용 검토하겠습니다. 감사합니다.">건의 검토 안내</option>
+          <option value="탈퇴 요청이 접수되었습니다. 72시간 내 처리됩니다.">탈퇴 요청 접수</option>
+        </select>
+        <textarea name="content" class="form-control" rows="3" placeholder="답변 작성..." required style="margin-bottom:8px;font-size:13px"></textarea>
+        <div style="display:flex;gap:8px;align-items:center">
+          <label style="display:flex;align-items:center;gap:4px;font-size:11px;color:var(--text-sub);cursor:pointer">
+            <input type="checkbox" name="is_internal" value="1"> 내부 메모 (유저 비공개)
+          </label>
+          <button type="submit" class="btn btn-primary btn-sm" style="margin-left:auto;font-size:12px">전송</button>
+        </div>
+      </form>
+    </div>
+  </div>
+  <?php else: flash('티켓을 찾을 수 없습니다.', 'error'); endif; ?>
+  <?php else: ?>
+  <!-- CS Ticket List -->
+  <?php
+    $csPending = $pdo->query("SELECT COUNT(*) FROM cs_tickets WHERE status='pending'")->fetchColumn();
+    $csToday = $pdo->query("SELECT COUNT(*) FROM cs_tickets WHERE DATE(created_at)=CURDATE()")->fetchColumn();
+    $csUrgent = $pdo->query("SELECT COUNT(*) FROM cs_tickets WHERE priority IN ('urgent','high') AND status NOT IN ('resolved','closed','rejected')")->fetchColumn();
+    $csReport = $pdo->query("SELECT COUNT(*) FROM cs_tickets WHERE category_code IN ('report','tos_report') AND status NOT IN ('resolved','closed','rejected')")->fetchColumn();
+  ?>
+  <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:8px;margin-bottom:14px">
+    <div style="text-align:center;background:rgba(255,255,255,0.04);border-radius:8px;padding:10px 6px">
+      <div style="font-size:20px;font-weight:900;color:var(--primary)"><?=$csToday?></div>
+      <div style="font-size:10px;color:var(--text-sub)">오늘접수</div>
+    </div>
+    <div style="text-align:center;background:rgba(255,255,255,0.04);border-radius:8px;padding:10px 6px">
+      <div style="font-size:20px;font-weight:900;color:var(--warning)"><?=$csPending?></div>
+      <div style="font-size:10px;color:var(--text-sub)">미답변</div>
+    </div>
+    <div style="text-align:center;background:rgba(255,255,255,0.04);border-radius:8px;padding:10px 6px">
+      <div style="font-size:20px;font-weight:900;color:var(--danger)"><?=$csUrgent?></div>
+      <div style="font-size:10px;color:var(--text-sub)">긴급</div>
+    </div>
+    <div style="text-align:center;background:rgba(255,255,255,0.04);border-radius:8px;padding:10px 6px">
+      <div style="font-size:20px;font-weight:900;color:#ff4d6d"><?=$csReport?></div>
+      <div style="font-size:10px;color:var(--text-sub)">신고</div>
+    </div>
+  </div>
+
+  <!-- Filters -->
+  <form method="GET" style="display:flex;gap:6px;margin-bottom:12px;flex-wrap:wrap">
+    <input type="hidden" name="page" value="admin_dashboard">
+    <input type="hidden" name="tab" value="cs">
+    <select name="cs_status" class="form-control" style="flex:1;font-size:11px;padding:6px">
+      <option value="">전체상태</option>
+      <option value="pending" <?=($_GET['cs_status']??'')==='pending'?'selected':''?>>대기중</option>
+      <option value="in_review" <?=($_GET['cs_status']??'')==='in_review'?'selected':''?>>검토중</option>
+      <option value="waiting_user" <?=($_GET['cs_status']??'')==='waiting_user'?'selected':''?>>사용자확인</option>
+      <option value="resolved" <?=($_GET['cs_status']??'')==='resolved'?'selected':''?>>해결</option>
+      <option value="closed" <?=($_GET['cs_status']??'')==='closed'?'selected':''?>>종료</option>
+    </select>
+    <select name="cs_cat" class="form-control" style="flex:1;font-size:11px;padding:6px">
+      <option value="">전체카테고리</option>
+      <option value="inquiry" <?=($_GET['cs_cat']??'')==='inquiry'?'selected':''?>>문의</option>
+      <option value="report" <?=($_GET['cs_cat']??'')==='report'?'selected':''?>>신고</option>
+      <option value="tos_report" <?=($_GET['cs_cat']??'')==='tos_report'?'selected':''?>>약관위반</option>
+      <option value="bug" <?=($_GET['cs_cat']??'')==='bug'?'selected':''?>>버그</option>
+      <option value="suggest" <?=($_GET['cs_cat']??'')==='suggest'?'selected':''?>>건의</option>
+    </select>
+    <button type="submit" class="btn btn-sm btn-outline" style="font-size:11px"><i class="bi bi-funnel"></i></button>
+  </form>
+
+  <?php
+    $statusLabels = ['pending'=>'대기중','assigned'=>'배정됨','in_review'=>'검토중','waiting_user'=>'확인대기','resolved'=>'해결','closed'=>'종료','rejected'=>'반려'];
+    $statusColors = ['pending'=>'#f0ad4e','assigned'=>'#5bc0de','in_review'=>'#0d6efd','waiting_user'=>'#6f42c1','resolved'=>'#198754','closed'=>'#6c757d','rejected'=>'#dc3545'];
+  ?>
+  <?php if(empty($data)): ?>
+  <div style="text-align:center;padding:30px;color:var(--text-sub);font-size:13px">CS 티켓이 없습니다</div>
+  <?php else: foreach($data as $t): ?>
+  <a href="?page=admin_dashboard&tab=cs&ticket_id=<?=$t['id']?>" class="card" style="text-decoration:none;margin-bottom:8px;display:block">
+    <div class="card-body" style="padding:10px 12px">
+      <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">
+        <span style="font-size:10px;color:var(--text-sub)"><?=h($t['ticket_no'])?></span>
+        <span style="font-size:10px;font-weight:700;padding:2px 6px;border-radius:99px;background:<?=$statusColors[$t['status']]?>22;color:<?=$statusColors[$t['status']]?>"><?=$statusLabels[$t['status']]?></span>
+        <?php if(in_array($t['priority'],['urgent','high'])): ?>
+        <span style="font-size:9px;font-weight:700;padding:2px 5px;border-radius:4px;background:rgba(255,59,48,0.15);color:#ff3b30"><?=strtoupper($t['priority'])?></span>
+        <?php endif; ?>
+        <span style="margin-left:auto;font-size:10px;color:var(--text-sub)"><?=date('m.d H:i', strtotime($t['created_at']))?></span>
+      </div>
+      <div style="font-size:13px;font-weight:600;color:var(--text-main)"><?=h($t['title'])?></div>
+      <div style="font-size:11px;color:var(--text-sub);margin-top:3px">
+        👤 <?=h($t['user_name'])?> · <?=h($t['category_code'])?>
+        <?php if($t['admin_name']): ?> · 📋 <?=h($t['admin_name'])?><?php endif; ?>
+      </div>
+    </div>
+  </a>
+  <?php endforeach; endif; ?>
+  <?php endif; ?>
+
   <?php elseif($tab === 'appeals'): ?>
   <!-- [TF-11] 이의제기 관리 -->
   <div style="font-size:14px;font-weight:700;margin-bottom:12px"><i class="bi bi-chat-left-text"></i> 제재 이의제기 목록</div>
@@ -15969,6 +17085,17 @@ function pagTeamEval(PDO $pdo): void {
   </div>
   <?php if($done->fetch()): ?>
   <div class="tf-alert tf-alert-ok">이미 평가하셨습니다. 양 팀 캡틴 모두 평가하면 결과가 공식 반영됩니다.</div>
+  <?php
+    // Show existing review if any
+    $existingReview = null;
+    try { $revQ = $pdo->prepare("SELECT * FROM team_match_reviews WHERE match_id=? AND reviewer_team_id=?"); $revQ->execute([$matchId, $myTid]); $existingReview = $revQ->fetch(); } catch(PDOException $e) {}
+    if ($existingReview): ?>
+    <div class="card" style="margin-top:12px"><div class="card-body">
+      <p class="section-title">📝 작성한 방명록</p>
+      <div style="margin-bottom:6px"><?php for($i=1;$i<=5;$i++): ?><span style="color:<?=$i<=(int)$existingReview['rating']?'#ffb400':'#444'?>;font-size:16px">★</span><?php endfor; ?></div>
+      <?php if($existingReview['comment']): ?><div style="font-size:12px;color:var(--text-main);line-height:1.5"><?=h($existingReview['comment'])?></div><?php endif; ?>
+    </div></div>
+    <?php endif; ?>
   <?php else: ?>
   <form method="POST">
     <?=csrfInput()?>
@@ -16005,6 +17132,54 @@ function pagTeamEval(PDO $pdo): void {
     <button type="submit" class="btn btn-primary btn-w">평가 완료</button>
   </form>
   <?php endif; ?>
+
+  <!-- 상대팀 평가 방명록 (별점 + 코멘트) -->
+  <?php
+    $existingReview2 = null;
+    try { $revQ2 = $pdo->prepare("SELECT * FROM team_match_reviews WHERE match_id=? AND reviewer_team_id=?"); $revQ2->execute([$matchId, $myTid]); $existingReview2 = $revQ2->fetch(); } catch(PDOException $e) {}
+  ?>
+  <div class="card" style="margin-top:16px"><div class="card-body">
+    <p class="section-title">📝 상대팀 방명록 (별점 + 코멘트)</p>
+    <div style="font-size:11px;color:var(--text-sub);margin-bottom:10px">이 리뷰는 우리 팀과 관리자만 볼 수 있습니다. 관리자가 공개 전환 시 상대팀에도 표시됩니다.</div>
+    <?php if($existingReview2): ?>
+    <div style="background:rgba(0,255,136,0.05);border:1px solid rgba(0,255,136,0.2);border-radius:10px;padding:12px;margin-bottom:8px">
+      <div style="margin-bottom:6px">
+        <?php for($i=1;$i<=5;$i++): ?>
+        <span style="color:<?=$i<=(int)$existingReview2['rating']?'#ffb400':'#444'?>;font-size:16px">★</span>
+        <?php endfor; ?>
+      </div>
+      <?php if($existingReview2['comment']): ?>
+      <div style="font-size:12px;color:var(--text-main);line-height:1.5"><?=h($existingReview2['comment'])?></div>
+      <?php endif; ?>
+      <div style="font-size:10px;color:var(--text-sub);margin-top:6px">작성일: <?=date('Y.m.d', strtotime($existingReview2['created_at']))?></div>
+    </div>
+    <?php else: ?>
+    <form method="POST">
+      <?=csrfInput()?>
+      <input type="hidden" name="action" value="submit_team_review">
+      <input type="hidden" name="match_id" value="<?=$matchId?>">
+      <input type="hidden" name="target_team_id" value="<?=$targetTid?>">
+      <div style="margin-bottom:12px">
+        <div style="font-size:12px;font-weight:600;color:var(--text-sub);margin-bottom:6px">별점</div>
+        <div id="tf-star-rating" style="display:flex;gap:4px;font-size:24px;cursor:pointer">
+          <?php for($i=1;$i<=5;$i++): ?>
+          <span data-val="<?=$i?>" onclick="setRating(<?=$i?>)" style="color:#444;transition:color 0.2s">★</span>
+          <?php endfor; ?>
+        </div>
+        <input type="hidden" name="rating" id="tf-rating-input" value="3">
+      </div>
+      <div style="margin-bottom:12px">
+        <div style="font-size:12px;font-weight:600;color:var(--text-sub);margin-bottom:6px">코멘트 (선택)</div>
+        <textarea name="review_comment" class="form-control" rows="3" maxlength="500" placeholder="상대팀에 대한 인상을 남겨주세요..."></textarea>
+      </div>
+      <button type="submit" class="btn btn-primary btn-w">방명록 작성</button>
+    </form>
+    <script>
+    function setRating(n){document.getElementById('tf-rating-input').value=n;var stars=document.querySelectorAll('#tf-star-rating span');stars.forEach(function(s){s.style.color=parseInt(s.dataset.val)<=n?'#ffb400':'#444';});}
+    setRating(3);
+    </script>
+    <?php endif; ?>
+  </div></div>
 </div>
 <?php }
 
@@ -16051,6 +17226,473 @@ function pagSosCreate(PDO $pdo): void {
 // 알림 목록 페이지
 // ═══════════════════════════════════════════════════════════════
 // [TF-25] 제재 이의제기 페이지
+
+// ═══════════════════════════════════════════════════════════════
+// CS CENTER PAGE
+// ═══════════════════════════════════════════════════════════════
+function pagCS(PDO $pdo): void {
+    requireLogin();
+    $action = $_GET['action'] ?? '';
+
+    switch ($action) {
+        case 'new': pagCSNew($pdo); break;
+        case 'my': pagCSMy($pdo); break;
+        case 'view': pagCSView($pdo); break;
+        case 'download': pagCSDownload($pdo); break;
+        case 'team': pagCSTeam($pdo); break;
+        default: pagCSHome($pdo); break;
+    }
+}
+
+function pagCSDownload(PDO $pdo): void {
+    $ticketId = (int)($_GET['ticket_id'] ?? 0);
+    $file = basename($_GET['file'] ?? '');
+    if (!$ticketId || !$file) { http_response_code(400); exit('Bad request'); }
+
+    // Verify ticket ownership or admin
+    $uid = me()['id'];
+    if (isAnyAdmin()) {
+        $ticket = $pdo->prepare("SELECT id FROM cs_tickets WHERE id=?");
+        $ticket->execute([$ticketId]);
+    } else {
+        $ticket = $pdo->prepare("SELECT id FROM cs_tickets WHERE id=? AND user_id=?");
+        $ticket->execute([$ticketId, $uid]);
+    }
+    if (!$ticket->fetch()) { http_response_code(403); exit('Access denied'); }
+
+    // Validate filename (only allow safe characters)
+    if (!preg_match('/^cs_\d+_\d+\.(jpg|jpeg|png|gif|webp)$/i', $file)) {
+        http_response_code(400); exit('Invalid file');
+    }
+
+    $path = '/var/www/html/uploads/cs/' . $file;
+    if (!file_exists($path)) { http_response_code(404); exit('File not found'); }
+
+    $mime = mime_content_type($path);
+    $allowedMimes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
+    if (!in_array($mime, $allowedMimes)) { http_response_code(403); exit('Invalid file type'); }
+
+    header('Content-Type: ' . $mime);
+    header('Content-Disposition: inline; filename="' . $file . '"');
+    header('Content-Length: ' . filesize($path));
+    header('Cache-Control: private, max-age=3600');
+    readfile($path);
+    exit;
+}
+function pagCSHome(PDO $pdo): void {
+    // FAQs
+    $faqs = $pdo->query("SELECT * FROM cs_faqs WHERE is_published=1 ORDER BY display_order LIMIT 8")->fetchAll();
+    // Categories
+    $cats = $pdo->query("SELECT * FROM cs_categories WHERE is_active=1 ORDER BY display_order")->fetchAll();
+    // Unread count (tickets with admin reply after user's last message)
+    $uid = me()['id'];
+    $unread = $pdo->prepare("SELECT COUNT(*) FROM cs_tickets t WHERE t.user_id=? AND t.status NOT IN ('closed','rejected') AND EXISTS (SELECT 1 FROM cs_messages m WHERE m.ticket_id=t.id AND m.sender_type='admin' AND m.is_internal_note=0 AND m.created_at > COALESCE((SELECT MAX(m2.created_at) FROM cs_messages m2 WHERE m2.ticket_id=t.id AND m2.sender_type='user'),t.created_at))");
+    $unread->execute([$uid]); $unreadCount = (int)$unread->fetchColumn();
+    ?>
+<div class="container">
+  <h2 style="font-size:18px;font-weight:700;margin-bottom:16px"><i class="bi bi-headset" style="color:var(--primary)"></i> 고객센터</h2>
+
+  <!-- 검색 -->
+  <div style="position:relative;margin-bottom:16px">
+    <input type="text" id="csFaqSearch" class="form-control" placeholder="자주 묻는 질문 검색..." style="padding-left:36px">
+    <i class="bi bi-search" style="position:absolute;left:12px;top:50%;transform:translateY(-50%);color:var(--text-sub)"></i>
+  </div>
+
+  <!-- FAQ -->
+  <div class="card" style="margin-bottom:16px">
+    <div class="card-body" style="padding:12px">
+      <div style="font-size:14px;font-weight:700;margin-bottom:10px">💡 자주 묻는 질문</div>
+      <div id="csFaqList">
+      <?php foreach ($faqs as $faq): ?>
+        <details class="cs-faq-item" style="border-bottom:1px solid rgba(255,255,255,0.06);padding:10px 0">
+          <summary style="font-size:13px;font-weight:600;cursor:pointer;list-style:none;display:flex;align-items:center;gap:8px">
+            <span style="color:var(--primary)">Q</span>
+            <span class="faq-q"><?=h($faq['question'])?></span>
+            <span style="margin-left:auto;color:var(--text-sub);font-size:11px">▼</span>
+          </summary>
+          <div style="font-size:12px;color:var(--text-sub);padding:8px 0 4px 20px;line-height:1.6"><?=nl2br(h($faq['answer']))?></div>
+        </details>
+      <?php endforeach; ?>
+      </div>
+    </div>
+  </div>
+
+  <!-- Category Grid -->
+  <div style="font-size:14px;font-weight:700;margin-bottom:10px">📋 문의 카테고리</div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:16px">
+    <?php foreach ($cats as $cat): ?>
+    <a href="?page=cs&action=new&cat=<?=h($cat['code'])?>" class="card" style="text-decoration:none">
+      <div class="card-body" style="text-align:center;padding:16px 10px">
+        <div style="font-size:28px;margin-bottom:6px"><?=h($cat['icon'])?></div>
+        <div style="font-size:13px;font-weight:700;color:var(--text-main)"><?=h($cat['name'])?></div>
+        <div style="font-size:11px;color:var(--text-sub);margin-top:4px"><?=h($cat['description'])?></div>
+      </div>
+    </a>
+    <?php endforeach; ?>
+  </div>
+
+  <!-- My Tickets Button -->
+  <a href="?page=cs&action=my" class="btn btn-primary btn-w" style="position:relative;font-size:14px;padding:14px">
+    📬 내 문의 내역
+    <?php if ($unreadCount > 0): ?>
+    <span style="position:absolute;top:8px;right:12px;background:#ff3b30;color:#fff;border-radius:999px;font-size:10px;min-width:18px;height:18px;display:flex;align-items:center;justify-content:center;font-weight:800;padding:0 4px"><?=$unreadCount?></span>
+    <?php endif; ?>
+  </a>
+
+  <!-- 운영시간 -->
+  <div style="text-align:center;margin-top:20px;padding:16px;border:1px dashed rgba(255,255,255,0.1);border-radius:12px">
+    <div style="font-size:12px;color:var(--text-sub)">⏰ 운영시간</div>
+    <div style="font-size:13px;font-weight:600;margin-top:4px">평일 10:00 ~ 18:00</div>
+    <div style="font-size:11px;color:var(--text-sub);margin-top:4px">답변은 접수 후 24시간 이내 제공됩니다</div>
+  </div>
+</div>
+<script>
+document.getElementById('csFaqSearch').addEventListener('input', function() {
+  const q = this.value.toLowerCase();
+  document.querySelectorAll('.cs-faq-item').forEach(item => {
+    const text = item.querySelector('.faq-q').textContent.toLowerCase();
+    item.style.display = text.includes(q) ? '' : 'none';
+  });
+});
+</script>
+<?php
+}
+
+function pagCSNew(PDO $pdo): void {
+    $catCode = $_GET['cat'] ?? '';
+    $cat = $pdo->prepare("SELECT * FROM cs_categories WHERE code=? AND is_active=1");
+    $cat->execute([$catCode]); $cat = $cat->fetch();
+    if (!$cat) { flash('유효하지 않은 카테고리입니다.', 'error'); redirect('?page=cs'); }
+    ?>
+<div class="container">
+  <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px">
+    <a href="?page=cs" style="color:var(--text-sub);font-size:18px"><i class="bi bi-arrow-left"></i></a>
+    <h2 style="font-size:16px;font-weight:700;margin:0"><?=h($cat['icon'])?> <?=h($cat['name'])?></h2>
+  </div>
+
+  <form method="POST" enctype="multipart/form-data" class="card">
+    <div class="card-body">
+      <?=csrfInput()?>
+      <input type="hidden" name="action" value="cs_submit_ticket">
+      <input type="hidden" name="category" value="<?=h($catCode)?>">
+
+      <?php if ($catCode === 'withdraw'): ?>
+      <div style="background:rgba(255,59,48,0.1);border:1px solid rgba(255,59,48,0.3);border-radius:10px;padding:12px;margin-bottom:16px">
+        <div style="font-size:13px;font-weight:700;color:#ff3b30">⚠️ 탈퇴 안내</div>
+        <div style="font-size:12px;color:var(--text-sub);margin-top:6px;line-height:1.6">
+          • 탈퇴 시 개인정보는 영구 삭제됩니다<br>
+          • 경기 기록은 익명화 처리됩니다<br>
+          • 보유 포인트/팀 정보는 복구 불가합니다<br>
+          • 처리까지 최대 7일 소요됩니다
+        </div>
+      </div>
+      <div class="form-group" style="margin-bottom:12px">
+        <label style="font-size:12px;font-weight:600;margin-bottom:4px;display:block">탈퇴 사유</label>
+        <select name="sub_type" class="form-control" required>
+          <option value="">선택하세요</option>
+          <option value="no_use">더 이상 사용하지 않음</option>
+          <option value="other_app">다른 앱 사용</option>
+          <option value="privacy">개인정보 우려</option>
+          <option value="bad_experience">불만족스러운 경험</option>
+          <option value="other">기타</option>
+        </select>
+      </div>
+      <?php endif; ?>
+
+      <?php if (in_array($catCode, ['report', 'tos_report'])): ?>
+      <div class="form-group" style="margin-bottom:12px">
+        <label style="font-size:12px;font-weight:600;margin-bottom:4px;display:block">🎯 신고 대상 (유저 ID 또는 이름)</label>
+        <input type="text" name="related_user_id" class="form-control" placeholder="유저 ID (숫자) 또는 이름">
+      </div>
+      <div class="form-group" style="margin-bottom:12px">
+        <label style="font-size:12px;font-weight:600;margin-bottom:4px;display:block">관련 경기 ID (선택)</label>
+        <input type="number" name="related_match_id" class="form-control" placeholder="경기 ID (선택사항)">
+      </div>
+      <?php endif; ?>
+
+      <?php if ($catCode === 'bug'): ?>
+      <div class="form-group" style="margin-bottom:12px">
+        <label style="font-size:12px;font-weight:600;margin-bottom:4px;display:block">📱 기기 정보</label>
+        <input type="text" name="sub_type" class="form-control" placeholder="예: iPhone 15 / Galaxy S24 / Chrome">
+      </div>
+      <?php endif; ?>
+
+      <?php if (in_array($catCode, ['partnership', 'ad'])): ?>
+      <div class="form-group" style="margin-bottom:12px">
+        <label style="font-size:12px;font-weight:600;margin-bottom:4px;display:block">🏢 업체명/담당자</label>
+        <input type="text" name="sub_type" class="form-control" placeholder="업체명 - 담당자명 - 연락처" required>
+      </div>
+      <?php endif; ?>
+
+      <div class="form-group" style="margin-bottom:12px">
+        <label style="font-size:12px;font-weight:600;margin-bottom:4px;display:block">제목 *</label>
+        <input type="text" name="title" class="form-control" placeholder="문의 제목을 입력하세요" required maxlength="255" minlength="3">
+      </div>
+
+      <div class="form-group" style="margin-bottom:12px">
+        <label style="font-size:12px;font-weight:600;margin-bottom:4px;display:block">내용 *</label>
+        <textarea name="content" class="form-control" rows="6" placeholder="<?php
+          echo match($catCode) {
+            'bug' => '버그 재현 절차를 상세히 적어주세요.\n1. ...\n2. ...\n3. ...',
+            'report','tos_report' => '신고 사유와 증거를 상세히 적어주세요.',
+            'suggest' => '개선하고 싶은 기능이나 새로운 아이디어를 적어주세요.',
+            'withdraw' => '탈퇴 사유를 상세히 적어주세요.',
+            default => '문의 내용을 상세히 적어주세요.',
+          };
+        ?>" required minlength="10" style="resize:vertical"></textarea>
+      </div>
+
+      <div class="form-group" style="margin-bottom:16px">
+        <label style="font-size:12px;font-weight:600;margin-bottom:4px;display:block">📎 이미지 첨부 (선택)</label>
+        <input type="file" name="image" accept="image/*" class="form-control" style="font-size:12px">
+        <div style="font-size:11px;color:var(--text-sub);margin-top:4px">최대 5MB (jpg, png, gif, webp)</div>
+      </div>
+
+      <?php if ($catCode === 'withdraw'): ?>
+      <label style="display:flex;align-items:flex-start;gap:8px;margin-bottom:16px;cursor:pointer">
+        <input type="checkbox" name="confirm_delete" required style="margin-top:2px">
+        <span style="font-size:12px;color:var(--text-sub)">위 안내사항을 확인했으며, 데이터 삭제에 동의합니다.</span>
+      </label>
+      <?php endif; ?>
+
+      <button type="submit" class="btn btn-primary btn-w">문의 접수하기</button>
+    </div>
+  </form>
+</div>
+<?php
+}
+
+function pagCSMy(PDO $pdo): void {
+    $uid = me()['id'];
+    $tickets = $pdo->prepare("SELECT t.*, c.icon, c.name AS cat_name FROM cs_tickets t JOIN cs_categories c ON c.code=t.category_code WHERE t.user_id=? ORDER BY t.created_at DESC LIMIT 50");
+    $tickets->execute([$uid]); $tickets = $tickets->fetchAll();
+    $statusColors = ['pending'=>'#f0ad4e','assigned'=>'#5bc0de','in_review'=>'#0d6efd','waiting_user'=>'#6f42c1','resolved'=>'#198754','closed'=>'#6c757d','rejected'=>'#dc3545'];
+    $statusLabels = ['pending'=>'대기중','assigned'=>'배정됨','in_review'=>'검토중','waiting_user'=>'확인요청','resolved'=>'해결','closed'=>'종료','rejected'=>'반려'];
+    ?>
+<div class="container">
+  <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px">
+    <a href="?page=cs" style="color:var(--text-sub);font-size:18px"><i class="bi bi-arrow-left"></i></a>
+    <h2 style="font-size:16px;font-weight:700;margin:0">📬 내 문의 내역</h2>
+  </div>
+
+  <?php if (empty($tickets)): ?>
+  <div class="card"><div class="card-body" style="text-align:center;padding:40px 20px">
+    <div style="font-size:40px;margin-bottom:8px">📭</div>
+    <div style="font-size:14px;color:var(--text-sub)">문의 내역이 없습니다</div>
+    <a href="?page=cs" class="btn btn-primary" style="margin-top:12px">문의하기</a>
+  </div></div>
+  <?php else: ?>
+  <?php foreach ($tickets as $t): ?>
+  <a href="?page=cs&action=view&id=<?=$t['id']?>" class="card" style="text-decoration:none;margin-bottom:8px;display:block">
+    <div class="card-body" style="padding:12px 14px">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+        <span style="font-size:16px"><?=h($t['icon'])?></span>
+        <span style="font-size:12px;color:var(--text-sub)"><?=h($t['ticket_no'])?></span>
+        <span style="margin-left:auto;font-size:10px;font-weight:700;padding:3px 8px;border-radius:99px;background:<?=$statusColors[$t['status']]?>22;color:<?=$statusColors[$t['status']]?>"><?=$statusLabels[$t['status']] ?? $t['status']?></span>
+      </div>
+      <div style="font-size:13px;font-weight:600;color:var(--text-main)"><?=h($t['title'])?></div>
+      <div style="font-size:11px;color:var(--text-sub);margin-top:4px"><?=date('Y.m.d H:i', strtotime($t['created_at']))?></div>
+    </div>
+  </a>
+  <?php endforeach; ?>
+  <?php endif; ?>
+</div>
+<?php
+}
+
+
+// ── 팀 관리자용 CS: 팀 관련 문의 보기 ──
+function pagCSTeam(PDO $pdo): void {
+    requireLogin();
+    if (!isCaptain()) { flash('캡틴/매니저만 접근 가능합니다.', 'error'); redirect('?page=cs'); }
+    $tid = myTeamId();
+    if (!$tid) { flash('소속 팀이 없습니다.', 'error'); redirect('?page=cs'); }
+
+    // 팀원 ID 목록
+    $tmStmt = $pdo->prepare("SELECT user_id FROM team_members WHERE team_id=? AND status='active'");
+    $tmStmt->execute([$tid]);
+    $memberIds = array_column($tmStmt->fetchAll(), 'user_id');
+
+    $tickets = [];
+    if ($memberIds) {
+        $ph = implode(",", array_fill(0, count($memberIds), "?"));
+        $sql = "SELECT DISTINCT t.*, c.icon, c.name AS cat_name, u.name AS user_name
+                FROM cs_tickets t
+                JOIN cs_categories c ON c.code=t.category_code
+                JOIN users u ON u.id=t.user_id
+                WHERE t.related_team_id = ?
+                   OR t.user_id IN ($ph)
+                   OR t.related_user_id IN ($ph)
+                ORDER BY t.created_at DESC LIMIT 50";
+        $params = array_merge([$tid], $memberIds, $memberIds);
+        $stmt = $pdo->prepare($sql);
+        $stmt->execute($params);
+        $tickets = $stmt->fetchAll();
+    }
+
+    $statusColors = ['pending'=>'#f0ad4e','assigned'=>'#5bc0de','in_review'=>'#0d6efd','waiting_user'=>'#6f42c1','resolved'=>'#198754','closed'=>'#6c757d','rejected'=>'#dc3545'];
+    $statusLabels = ['pending'=>'대기중','assigned'=>'배정됨','in_review'=>'검토중','waiting_user'=>'확인요청','resolved'=>'해결','closed'=>'종료','rejected'=>'반려'];
+    ?>
+<div class="container">
+  <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px">
+    <a href="?page=cs" style="color:var(--text-sub);font-size:18px"><i class="bi bi-arrow-left"></i></a>
+    <h2 style="font-size:16px;font-weight:700;margin:0">🛡️ 팀 관련 문의</h2>
+  </div>
+
+  <div style="font-size:12px;color:var(--text-sub);margin-bottom:14px;padding:10px 14px;background:rgba(0,200,83,0.06);border:1px solid rgba(0,200,83,0.15);border-radius:10px">
+    팀원이 제출한 문의, 팀 관련 신고, 팀원에 대한 신고 등을 확인할 수 있습니다.
+  </div>
+
+  <?php if (empty($tickets)): ?>
+  <div class="card"><div class="card-body" style="text-align:center;padding:40px 20px">
+    <div style="font-size:40px;margin-bottom:8px">✅</div>
+    <div style="font-size:14px;color:var(--text-sub)">팀 관련 문의가 없습니다</div>
+  </div></div>
+  <?php else: ?>
+  <div style="font-size:12px;color:var(--text-sub);margin-bottom:8px">총 <?=count($tickets)?>건</div>
+  <?php foreach ($tickets as $t): ?>
+  <div class="card" style="margin-bottom:8px">
+    <div class="card-body" style="padding:12px 14px">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+        <span style="font-size:16px"><?=h($t['icon'])?></span>
+        <span style="font-size:12px;color:var(--text-sub)"><?=h($t['ticket_no'])?></span>
+        <span style="font-size:11px;color:var(--text-sub);margin-left:4px"><?=h($t['user_name'])?></span>
+        <span style="margin-left:auto;font-size:10px;font-weight:700;padding:3px 8px;border-radius:99px;background:<?=$statusColors[$t['status']] ?? '#666'?>22;color:<?=$statusColors[$t['status']] ?? '#666'?>"><?=$statusLabels[$t['status']] ?? $t['status']?></span>
+      </div>
+      <div style="font-size:13px;font-weight:600;color:var(--text-main)"><?=h($t['title'])?></div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-top:6px">
+        <span style="font-size:11px;color:var(--text-sub)"><?=date('Y.m.d H:i', strtotime($t['created_at']))?></span>
+        <?php if(in_array($t['category_code'], ['report','tos_report'])): ?>
+        <span style="font-size:10px;padding:2px 8px;border-radius:99px;background:rgba(231,76,60,0.15);color:#e74c3c;font-weight:600">신고</span>
+        <?php endif; ?>
+      </div>
+    </div>
+  </div>
+  <?php endforeach; ?>
+  <?php endif; ?>
+</div>
+<?php
+}
+
+function pagCSView(PDO $pdo): void {
+    $ticketId = (int)($_GET['id'] ?? 0);
+    $uid = me()['id'];
+
+    // IDOR 차단: 관리자는 모든 티켓, 일반 유저는 본인 티켓만
+    if (isAdmin()) {
+        $ticket = $pdo->prepare("SELECT t.*, c.icon, c.name AS cat_name FROM cs_tickets t JOIN cs_categories c ON c.code=t.category_code WHERE t.id=?");
+        $ticket->execute([$ticketId]); $ticket = $ticket->fetch();
+    } else {
+        $ticket = $pdo->prepare("SELECT t.*, c.icon, c.name AS cat_name FROM cs_tickets t JOIN cs_categories c ON c.code=t.category_code WHERE t.id=? AND t.user_id=?");
+        $ticket->execute([$ticketId, $uid]); $ticket = $ticket->fetch();
+    }
+    if (!$ticket) { flash('티켓을 찾을 수 없습니다.', 'error'); redirect('?page=cs&action=my'); }
+    // 본인 티켓만 조회 가능 (관리자 제외)
+    if (!isAdmin() && (int)$ticket['user_id'] !== (int)me()['id']) {
+        flash('접근 권한이 없습니다.', 'error');
+        redirect('?page=cs&action=my');
+    }
+
+    // Messages (exclude internal notes for users)
+    $msgs = $pdo->prepare("SELECT m.*, u.name AS sender_name FROM cs_messages m LEFT JOIN users u ON u.id=m.sender_id WHERE m.ticket_id=? AND m.is_internal_note=0 ORDER BY m.created_at ASC");
+    $msgs->execute([$ticketId]); $msgs = $msgs->fetchAll();
+
+    $statusLabels = ['pending'=>'대기중','assigned'=>'배정됨','in_review'=>'검토중','waiting_user'=>'확인요청','resolved'=>'해결완료','closed'=>'종료','rejected'=>'반려'];
+    $statusColors = ['pending'=>'#f0ad4e','assigned'=>'#5bc0de','in_review'=>'#0d6efd','waiting_user'=>'#6f42c1','resolved'=>'#198754','closed'=>'#6c757d','rejected'=>'#dc3545'];
+    $isClosed = in_array($ticket['status'], ['closed', 'rejected']);
+    ?>
+<div class="container">
+  <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px">
+    <a href="?page=cs&action=my" style="color:var(--text-sub);font-size:18px"><i class="bi bi-arrow-left"></i></a>
+    <h2 style="font-size:15px;font-weight:700;margin:0"><?=h($ticket['icon'])?> <?=h($ticket['cat_name'])?></h2>
+  </div>
+
+  <!-- Ticket Info -->
+  <div class="card" style="margin-bottom:12px">
+    <div class="card-body" style="padding:12px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+        <span style="font-size:11px;color:var(--text-sub)"><?=h($ticket['ticket_no'])?></span>
+        <span style="font-size:10px;font-weight:700;padding:3px 8px;border-radius:99px;background:<?=$statusColors[$ticket['status']]?>22;color:<?=$statusColors[$ticket['status']]?>"><?=$statusLabels[$ticket['status']] ?? $ticket['status']?></span>
+      </div>
+      <div style="font-size:14px;font-weight:700"><?=h($ticket['title'])?></div>
+      <div style="font-size:11px;color:var(--text-sub);margin-top:4px"><?=date('Y.m.d H:i', strtotime($ticket['created_at']))?></div>
+      <?php if ($ticket['image_url']): ?>
+      <?php $dlUrl = "?page=cs&action=download&ticket_id=" . $ticket['id'] . "&file=" . urlencode(basename($ticket['image_url'])); ?>
+      <div style="margin-top:8px"><img src="<?=h($dlUrl)?>" style="max-width:100%;border-radius:8px;max-height:200px;object-fit:cover" onclick="tfViewPhoto('<?=h($dlUrl)?>')"></div>
+      <?php endif; ?>
+    </div>
+  </div>
+
+  <!-- Messages -->
+  <div style="margin-bottom:<?=$isClosed?'16':'80'?>px">
+    <?php foreach ($msgs as $msg): ?>
+    <?php if ($msg['sender_type'] === 'system'): ?>
+    <div style="text-align:center;margin:12px 0">
+      <span style="font-size:11px;color:var(--text-sub);background:rgba(255,255,255,0.05);padding:4px 12px;border-radius:99px"><?=h($msg['content'])?></span>
+    </div>
+    <?php elseif ($msg['sender_type'] === 'admin'): ?>
+    <div style="display:flex;justify-content:flex-start;margin:8px 0">
+      <div style="max-width:80%">
+        <div style="font-size:10px;color:var(--info);margin-bottom:3px;font-weight:600">운영팀 <?=h($msg['sender_name'] ?? '')?></div>
+        <div style="background:rgba(13,110,253,0.15);border:1px solid rgba(13,110,253,0.25);border-radius:12px 12px 12px 4px;padding:10px 14px;font-size:13px;line-height:1.5;color:var(--text-main)"><?=nl2br(h($msg['content']))?></div>
+        <div style="font-size:10px;color:var(--text-sub);margin-top:3px"><?=date('m.d H:i', strtotime($msg['created_at']))?></div>
+      </div>
+    </div>
+    <?php else: ?>
+    <div style="display:flex;justify-content:flex-end;margin:8px 0">
+      <div style="max-width:80%">
+        <div style="background:rgba(0,200,83,0.15);border:1px solid rgba(0,200,83,0.25);border-radius:12px 12px 4px 12px;padding:10px 14px;font-size:13px;line-height:1.5;color:var(--text-main)"><?=nl2br(h($msg['content']))?></div>
+        <div style="font-size:10px;color:var(--text-sub);margin-top:3px;text-align:right"><?=date('m.d H:i', strtotime($msg['created_at']))?></div>
+      </div>
+    </div>
+    <?php endif; ?>
+    <?php endforeach; ?>
+  </div>
+
+  <!-- 유저 티켓 재오픈 버튼 (resolved만) -->
+  <?php if(!isAdmin() && $ticket['status'] === 'resolved'): ?>
+  <form method="POST" style="margin-top:10px;text-align:center;margin-bottom:6px">
+    <?=csrfInput()?>
+    <input type="hidden" name="action" value="cs_reopen_ticket">
+    <input type="hidden" name="ticket_id" value="<?=$ticket['id']?>">
+    <button type="submit" class="btn btn-outline btn-w" style="font-size:12px;color:var(--warning);border-color:var(--warning)" onclick="return confirm('문의를 재오픈하시겠습니까?')">
+        🔄 아직 해결되지 않았어요
+    </button>
+  </form>
+  <?php endif; ?>
+
+  <!-- 유저 문의 종료 버튼 -->
+  <?php if(!isAdmin() && in_array($ticket['status'], ['resolved','waiting_user','in_review','assigned','pending'])): ?>
+  <form method="POST" style="margin-top:10px;text-align:center;margin-bottom:12px">
+    <?=csrfInput()?>
+    <input type="hidden" name="action" value="cs_close_ticket">
+    <input type="hidden" name="ticket_id" value="<?=$ticket['id']?>">
+    <button type="submit" class="btn btn-ghost btn-w" style="font-size:12px" onclick="return confirm('문의를 종료하시겠습니까?')">
+        ✅ 문의 종료 (해결됨)
+    </button>
+  </form>
+  <?php endif; ?>
+
+  <!-- Reply Input (fixed at bottom) -->
+  <?php if (!$isClosed): ?>
+  <form method="POST" style="position:fixed;bottom:60px;left:0;right:0;background:var(--bg-surface);border-top:1px solid rgba(255,255,255,0.08);padding:10px 12px;display:flex;gap:8px;max-width:600px;margin:0 auto">
+    <?=csrfInput()?>
+    <input type="hidden" name="action" value="cs_reply_ticket">
+    <input type="hidden" name="ticket_id" value="<?=$ticket['id']?>">
+    <input type="text" name="content" class="form-control" placeholder="메시지 입력..." required style="flex:1;font-size:13px">
+    <button type="submit" class="btn btn-primary" style="padding:8px 14px"><i class="bi bi-send-fill"></i></button>
+  </form>
+  <?php else: ?>
+  <div style="text-align:center;padding:12px;color:var(--text-sub);font-size:12px;border:1px dashed rgba(255,255,255,0.1);border-radius:8px">
+  <div style="text-align:center;padding:16px;color:var(--text-sub);font-size:13px">
+    ✅ 종료된 문의입니다. 추가 문의가 있으시면 새 문의를 등록해주세요.
+  </div>
+  </div>
+  <?php endif; ?>
+</div>
+<?php
+}
+
 function pagAppeal(PDO $pdo): void {
     $penInfo = $_SESSION['penalty_info'] ?? null;
     ?>
